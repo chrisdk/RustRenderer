@@ -306,7 +306,14 @@ function fadeHints(): void {
 
 async function main(): Promise<void> {
     // 1. Load the WASM binary.
-    await init();
+    setStatus('Loading WASM…');
+    try {
+        await init();
+    } catch (err) {
+        setStatus(`WASM load failed: ${err}`);
+        console.error('WASM init failed:', err);
+        return;
+    }
 
     // 2. Populate the scene picker. The buttons only generate GLB bytes and
     //    call load_scene() — they don't need a GPU device to be rendered into
@@ -320,6 +327,7 @@ async function main(): Promise<void> {
         await init_renderer();
     } catch (err) {
         setStatus(`WebGPU unavailable: ${err}`);
+        console.error('init_renderer failed:', err);
         return;
     }
 
@@ -329,4 +337,7 @@ async function main(): Promise<void> {
     tick();
 }
 
-main();
+main().catch(err => {
+    setStatus(`Unexpected error: ${err}`);
+    console.error('main() failed:', err);
+});
