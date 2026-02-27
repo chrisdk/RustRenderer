@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 gltf     = "1"
-glam     = "0.29"
+glam     = "0.32"
 bytemuck = { version = "1", features = ["derive"] }
 log      = "0.4"   # logging facade; backend differs per target (see below)
 
@@ -40,7 +40,7 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "renderer"
