@@ -81,6 +81,15 @@ export const BUILTIN_SCENES: readonly BuiltinScene[] = [
         build:       khronos('DamagedHelmet'),
     },
 
+    {
+        name:        'glass-hurricane-candle-holder',
+        label:       'Glass Hurricane Candle Holder',
+        // CC BY 4.0 — attribution required.
+        // Created by Eric Chadwick for Wayfair, LLC (2021).
+        attribution: '© 2021 Wayfair / Eric Chadwick · CC BY 4.0',
+        build:       khronos('GlassHurricaneCandleHolder'),
+    },
+
     // ── CC0 (public domain) ───────────────────────────────────────────────────
     {
         name:  'water-bottle',
