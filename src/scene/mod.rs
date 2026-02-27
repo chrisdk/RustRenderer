@@ -128,6 +128,7 @@ impl Scene {
                     emissive_texture: mat.emissive_texture()
                         .map(|i| i.texture().source().index() as i32)
                         .unwrap_or(-1),
+                    _pad: [0, 0, 0],
                 }
             })
             .collect();

@@ -67,9 +67,12 @@ const MAX_LEAF_TRIS: usize = 4;
 /// the traversal code which kind of node this is and how to interpret
 /// `right_or_first`.
 ///
-/// This struct is 32 bytes, which matches the size of a single WGSL struct
-/// in a storage buffer, making it straightforward to upload to the GPU.
-#[derive(Debug, Clone, Copy)]
+/// This struct is exactly 32 bytes — a multiple of 16, satisfying WGSL's
+/// storage-buffer array-element alignment requirement. `#[repr(C)]` and
+/// `bytemuck::Pod` allow zero-copy upload: `bytemuck::cast_slice(&nodes)`
+/// hands the GPU a raw byte slice with no intermediate allocation.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BvhNode {
     /// The minimum corner (smallest X, Y, Z) of this node's bounding box.
     pub aabb_min: [f32; 3],
@@ -97,7 +100,12 @@ pub struct BvhNode {
 /// Each triangle stores both its world-space vertex **positions** (used for
 /// fast ray–triangle intersection) and the original vertex **indices** (used
 /// after intersection to interpolate normals, UVs, and tangents for shading).
-#[derive(Debug, Clone, Copy)]
+///
+/// Padded to 64 bytes so WGSL is happy when this struct lives in a storage
+/// buffer array (WGSL requires array-element structs to be multiples of 16
+/// bytes). The `_pad` field is always zero and is ignored by the shader.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BvhTriangle {
     /// World-space position of the first vertex.
     pub v0: [f32; 3],
@@ -115,6 +123,9 @@ pub struct BvhTriangle {
 
     /// Index into [`Scene::materials`] for shading this triangle's surface.
     pub material_index: u32,
+
+    /// Padding to bring the struct to 64 bytes. Always zero; ignored by the GPU.
+    pub _pad: [u32; 3],
 }
 
 /// The fully built BVH acceleration structure.
@@ -157,6 +168,7 @@ impl Bvh {
                 i1: t.i1,
                 i2: t.i2,
                 material_index: t.material_index,
+                _pad: [0, 0, 0],
             })
             .collect();
 
@@ -333,6 +345,7 @@ fn transform_point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytemuck::Zeroable;
     use crate::scene::{
         Scene,
         geometry::{Vertex, Mesh, MeshInstance},
@@ -392,6 +405,36 @@ mod tests {
     // -------------------------------------------------------------------------
     // Tests
     // -------------------------------------------------------------------------
+
+    /// Guard the GPU buffer layout: if someone changes a field type or order,
+    /// the WGSL struct definitions will silently misread memory on the GPU.
+    /// Better to catch it here as a compile-time-like assertion.
+    #[test]
+    fn test_bvh_node_gpu_layout() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(size_of::<BvhNode>(),                   32);
+        assert_eq!(offset_of!(BvhNode, aabb_min),           0);
+        assert_eq!(offset_of!(BvhNode, right_or_first),    12);
+        assert_eq!(offset_of!(BvhNode, aabb_max),          16);
+        assert_eq!(offset_of!(BvhNode, count),             28);
+        // Verify bytemuck can actually cast it (would panic if not Pod)
+        let _: &[u8] = bytemuck::bytes_of(&BvhNode::zeroed());
+    }
+
+    #[test]
+    fn test_bvh_triangle_gpu_layout() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(size_of::<BvhTriangle>(),               64);
+        assert_eq!(offset_of!(BvhTriangle, v0),             0);
+        assert_eq!(offset_of!(BvhTriangle, v1),            12);
+        assert_eq!(offset_of!(BvhTriangle, v2),            24);
+        assert_eq!(offset_of!(BvhTriangle, i0),            36);
+        assert_eq!(offset_of!(BvhTriangle, i1),            40);
+        assert_eq!(offset_of!(BvhTriangle, i2),            44);
+        assert_eq!(offset_of!(BvhTriangle, material_index),48);
+        assert_eq!(offset_of!(BvhTriangle, _pad),          52);
+        let _: &[u8] = bytemuck::bytes_of(&BvhTriangle::zeroed());
+    }
 
     /// An empty scene should produce an empty BVH without panicking.
     #[test]

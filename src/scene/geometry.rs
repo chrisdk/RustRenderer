@@ -5,6 +5,13 @@
 /// corner is a Vertex. Beyond just its position in space, a vertex carries
 /// extra per-point data that the renderer uses to compute lighting and apply
 /// textures correctly.
+///
+/// The `#[repr(C)]` attribute fixes the memory layout to match the order the
+/// fields are declared, with no surprise padding inserted by the compiler.
+/// Combined with `bytemuck::Pod`, this lets us cast a `&[Vertex]` directly
+/// to `&[u8]` for zero-copy GPU buffer upload.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     /// The (x, y, z) position of this point in the mesh's local coordinate space.
     /// "Local space" means the coordinates are relative to the mesh's own origin,
@@ -80,4 +87,23 @@ pub struct MeshInstance {
     /// Stored in column-major order to match the GLTF file format and the
     /// convention used by the glam math library and WebGPU shaders.
     pub transform: [[f32; 4]; 4],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+    use std::mem::{offset_of, size_of};
+
+    /// Changing field order or types in Vertex silently breaks the GPU shader.
+    /// This test makes that mistake loud and immediate.
+    #[test]
+    fn test_vertex_gpu_layout() {
+        assert_eq!(size_of::<Vertex>(),           48);
+        assert_eq!(offset_of!(Vertex, position),   0);
+        assert_eq!(offset_of!(Vertex, normal),    12);
+        assert_eq!(offset_of!(Vertex, uv),        24);
+        assert_eq!(offset_of!(Vertex, tangent),   32);
+        let _: &[u8] = bytemuck::bytes_of(&Vertex::zeroed());
+    }
 }

@@ -9,6 +9,12 @@
 /// is present, it overrides the scalar for that property, allowing fine-grained
 /// variation across the surface (e.g. a surface that is rough in some areas
 /// and smooth in others). If no texture is present, the scalar applies uniformly.
+///
+/// `#[repr(C)]` and `bytemuck::Pod` allow zero-copy GPU upload. The struct is
+/// padded to 64 bytes because WGSL requires all array-element structs in
+/// storage buffers to be a multiple of 16 bytes in size.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Material {
     /// The base color of the surface, as an RGBA value. For non-metals this is
     /// essentially the "paint color". For metals it tints the reflections.
@@ -52,6 +58,11 @@ pub struct Material {
     /// Texture that provides per-pixel emissive color, allowing parts of a
     /// surface to glow while others remain dark.
     pub emissive_texture: i32,
+
+    /// Unused padding bytes. WGSL requires structs used as storage-buffer
+    /// array elements to be a multiple of 16 bytes; without this the struct
+    /// would be 52 bytes, which is not. Always zero.
+    pub _pad: [u32; 3],
 }
 
 impl Default for Material {
@@ -68,6 +79,32 @@ impl Default for Material {
             normal_texture:             -1,
             metallic_roughness_texture: -1,
             emissive_texture:           -1,
+            _pad:                       [0, 0, 0],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+    use std::mem::{offset_of, size_of};
+
+    /// Material is uploaded directly to a GPU storage buffer. If the layout
+    /// drifts from what the WGSL struct expects, every surface in the scene
+    /// will be shaded with garbage values — and it'll be very confusing.
+    #[test]
+    fn test_material_gpu_layout() {
+        assert_eq!(size_of::<Material>(),                             64);
+        assert_eq!(offset_of!(Material, albedo),                      0);
+        assert_eq!(offset_of!(Material, emissive),                   16);
+        assert_eq!(offset_of!(Material, metallic),                   28);
+        assert_eq!(offset_of!(Material, roughness),                  32);
+        assert_eq!(offset_of!(Material, albedo_texture),             36);
+        assert_eq!(offset_of!(Material, normal_texture),             40);
+        assert_eq!(offset_of!(Material, metallic_roughness_texture), 44);
+        assert_eq!(offset_of!(Material, emissive_texture),           48);
+        assert_eq!(offset_of!(Material, _pad),                       52);
+        let _: &[u8] = bytemuck::bytes_of(&Material::zeroed());
     }
 }
