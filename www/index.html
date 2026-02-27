@@ -49,10 +49,25 @@
             backdrop-filter: blur(4px);
         }
 
-        #load-btn {
+        /* ── Scene picker ──────────────────────────────────────────────────── */
+        #scene-picker {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        #scene-picker-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(255,255,255,0.45);
+            padding: 0 2px;
+        }
+
+        .scene-btn {
             align-self: flex-start;
-            background: rgba(255,255,255,0.12);
-            border: 1px solid rgba(255,255,255,0.25);
+            background: rgba(255,255,255,0.10);
+            border: 1px solid rgba(255,255,255,0.20);
             border-radius: 6px;
             color: #fff;
             cursor: pointer;
@@ -60,10 +75,29 @@
             padding: 6px 14px;
             backdrop-filter: blur(4px);
             transition: background 0.15s;
+            width: 100%;
+            text-align: left;
         }
-        #load-btn:hover { background: rgba(255,255,255,0.22); }
+        .scene-btn:hover  { background: rgba(255,255,255,0.20); }
+        .scene-btn.active { background: rgba(255,255,255,0.28);
+                            border-color: rgba(255,255,255,0.50); }
 
-        /* hidden file input wired to the button */
+        #load-btn {
+            align-self: flex-start;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 6px;
+            color: rgba(255,255,255,0.7);
+            cursor: pointer;
+            font-size: 12px;
+            padding: 5px 12px;
+            backdrop-filter: blur(4px);
+            transition: background 0.15s;
+            display: inline-block;
+        }
+        #load-btn:hover { background: rgba(255,255,255,0.14); }
+
+        /* hidden file input wired to the label */
         #file-input { display: none; }
 
         /* ── Controls hint (bottom-center) ────────────────────────────────── */
@@ -108,7 +142,11 @@
     <div id="ui">
         <div id="status-panel">
             <div id="status">Initializing WebGPU…</div>
-            <button id="load-btn">Load scene</button>
+            <div id="scene-picker">
+                <div id="scene-picker-label">Built-in scenes</div>
+                <!-- Buttons injected here by index.ts -->
+            </div>
+            <label id="load-btn" for="file-input">Load file…</label>
             <input id="file-input" type="file" accept=".gltf,.glb">
         </div>
 

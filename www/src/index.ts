@@ -15,18 +15,19 @@ import init, {
     render,
     get_pixels,
 } from '../pkg/render.js';
+import { BUILTIN_SCENES } from './scenes.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM references
 // ─────────────────────────────────────────────────────────────────────────────
 
-const canvas      = document.getElementById('canvas')     as HTMLCanvasElement;
-const ctx         = canvas.getContext('2d')!;
-const statusEl    = document.getElementById('status')!;
-const loadBtn     = document.getElementById('load-btn')!;
-const fileInput   = document.getElementById('file-input') as HTMLInputElement;
-const hintsEl     = document.getElementById('hints')!;
-const dropOverlay = document.getElementById('drop-overlay')!;
+const canvas       = document.getElementById('canvas')      as HTMLCanvasElement;
+const ctx          = canvas.getContext('2d')!;
+const statusEl     = document.getElementById('status')!;
+const fileInput    = document.getElementById('file-input')  as HTMLInputElement;
+const hintsEl      = document.getElementById('hints')!;
+const dropOverlay  = document.getElementById('drop-overlay')!;
+const scenePicker  = document.getElementById('scene-picker')!;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Camera state
@@ -198,10 +199,20 @@ function tick(): void {
 // Scene loading
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
+async function loadSceneBytes(
+    bytes: Uint8Array,
+    cameraPreset?: { position: [number, number, number]; yaw: number; pitch: number },
+): Promise<void> {
     setStatus('Loading scene…');
     try {
         load_scene(bytes);
+        // Apply the scene's recommended camera position, or leave the current
+        // camera where it is if no preset was supplied (e.g. drag-and-drop).
+        if (cameraPreset) {
+            camera.position = [...cameraPreset.position];
+            camera.yaw      = cameraPreset.yaw;
+            camera.pitch    = cameraPreset.pitch;
+        }
         sceneLoaded  = true;
         cameraDirty  = true;
         setStatus('Scene loaded — click to look around');
@@ -211,9 +222,38 @@ async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
     }
 }
 
+// ── Built-in scene picker ─────────────────────────────────────────────────────
+
+/**
+ * Populate the scene picker with one button per built-in scene.
+ * Called once after the WASM module is ready (buttons need the module loaded
+ * before clicking them does anything useful).
+ */
+function buildScenePicker(): void {
+    let activeBtn: HTMLButtonElement | null = null;
+
+    for (const scene of BUILTIN_SCENES) {
+        const btn = document.createElement('button');
+        btn.className   = 'scene-btn';
+        btn.textContent = scene.label;
+
+        btn.addEventListener('click', async () => {
+            if (activeBtn) activeBtn.classList.remove('active');
+            activeBtn = btn;
+            btn.classList.add('active');
+
+            const glb = scene.build();
+            await loadSceneBytes(new Uint8Array(glb), scene.camera);
+        });
+
+        scenePicker.appendChild(btn);
+    }
+}
+
 // ── File picker ──────────────────────────────────────────────────────────────
 
-loadBtn.addEventListener('click', () => fileInput.click());
+// #load-btn is a <label for="file-input">, so the browser opens the file
+// picker natively — no JS click forwarding needed.
 
 fileInput.addEventListener('change', async () => {
     const file = fileInput.files?.[0];
@@ -277,9 +317,12 @@ async function main(): Promise<void> {
         return;
     }
 
-    setStatus('Drop a GLTF / GLB file, or click "Load scene"');
+    setStatus('Choose a scene below, or drop a GLTF / GLB file');
 
-    // 3. Start the animation loop.
+    // 3. Populate the scene picker now that the WASM module is ready.
+    buildScenePicker();
+
+    // 4. Start the animation loop.
     tick();
 }
 
