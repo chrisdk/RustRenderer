@@ -10,3 +10,8 @@ pub struct Mesh {
     pub index_count:    u32, // always a multiple of 3
     pub material_index: u32,
 }
+
+pub struct MeshInstance {
+    pub mesh_index: u32,
+    pub transform:  [[f32; 4]; 4], // column-major world-space transform
+}
