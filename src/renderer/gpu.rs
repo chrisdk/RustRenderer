@@ -101,11 +101,13 @@ impl Renderer {
     /// Returns a human-readable error string if no suitable adapter is found
     /// or if device creation fails.
     pub async fn new() -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        // wgpu 28: Instance::new takes &InstanceDescriptor (borrowed).
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
+        // wgpu 28: request_adapter returns Result<Adapter, E>, not Option<Adapter>.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference:       wgpu::PowerPreference::HighPerformance,
@@ -113,20 +115,18 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| {
-                "no suitable GPU adapter found — is WebGPU supported?".to_string()
-            })?;
+            .map_err(|e| format!("no suitable GPU adapter found: {e}"))?;
 
         let info = adapter.get_info();
         log::info!("GPU adapter: {} ({:?})", info.name, info.backend);
 
+        // wgpu 28: request_device takes only &DeviceDescriptor (trace-path arg removed).
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("path tracer"),
                     ..Default::default()
                 },
-                None,
             )
             .await
             .map_err(|e| format!("GPU device creation failed: {e}"))?;
@@ -260,7 +260,8 @@ impl Renderer {
             &wgpu::PipelineLayoutDescriptor {
                 label:                Some("trace_layout"),
                 bind_group_layouts:   &[&scene_bgl, &frame_bgl],
-                push_constant_ranges: &[],
+                // wgpu 28: push_constant_ranges removed; replaced by immediate_size.
+                immediate_size: 0,
             }
         );
 
@@ -269,7 +270,8 @@ impl Renderer {
                 label:       Some("trace_pipeline"),
                 layout:      Some(&layout),
                 module:      &shader,
-                entry_point: "main",
+                // wgpu 28: entry_point is Option<&str> again.
+                entry_point: Some("main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache:       None,
             }
