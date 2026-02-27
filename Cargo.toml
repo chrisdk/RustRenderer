@@ -7,10 +7,28 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wasm-bindgen = "0.2"
-gltf = "1"
-glam = "0.29"
-bytemuck = { version = "1", features = ["derive"] }
+wasm-bindgen          = "0.2"
+wasm-bindgen-futures  = "0.4"   # async fn across the WASM boundary
+gltf                  = "1"
+glam                  = "0.29"
+bytemuck              = { version = "1", features = ["derive"] }
+log                   = "0.4"   # logging facade; backend differs per target
+
+# WebGPU — the whole reason this crate exists.
+# `webgpu` feature enables the browser's native WebGPU backend on wasm32.
+# On native targets wgpu uses Vulkan / Metal / DX12 regardless.
+wgpu = { version = "22", features = ["webgpu"] }
+
+# WASM-only: DOM access for canvas and browser console logging.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys                     = "0.3"
+console_log                = "1"   # routes `log::` macros to console.log()
+console_error_panic_hook   = "0.1" # turns Rust panics into readable JS errors
+web-sys = { version = "0.3", features = [
+    "Document",
+    "HtmlCanvasElement",
+    "Window",
+] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
