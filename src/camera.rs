@@ -314,6 +314,100 @@ mod tests {
         );
     }
 
+    /// With a 2:1 aspect ratio the horizontal FOV must be wider than the
+    /// vertical FOV. The right-edge ray's X deflection must exceed the
+    /// top-edge ray's Y deflection.
+    #[test]
+    fn test_aspect_ratio_widens_horizontal_fov() {
+        let cam = Camera::new([0., 0., 0.], FRAC_PI_2, 2.0); // 2:1 aspect
+
+        // Right-edge center ray: film_x = half_w = 2×tan(45°) = 2; film_y = 0.
+        // Raw dir = (0,0,−1) + 2×(1,0,0) = (2,0,−1); normalized x = 2/√5 ≈ 0.894
+        let right_edge = cam.ray(1.0, 0.5);
+
+        // Top-edge center ray: film_x = 0; film_y = half_h = 1.
+        // Raw dir = (0,0,−1) + (0,1,0); normalized y = 1/√2 ≈ 0.707
+        let top_edge = cam.ray(0.5, 0.0);
+
+        assert!(
+            right_edge.direction[0] > top_edge.direction[1],
+            "2:1 aspect: horizontal deflection ({:.3}) should exceed vertical ({:.3})",
+            right_edge.direction[0], top_edge.direction[1],
+        );
+    }
+
+    /// translate() accepts independent forward, right, and up scalars.
+    /// Verify that the right and up axes move the camera in the expected
+    /// world-space directions at the default orientation.
+    #[test]
+    fn test_translate_right_and_up() {
+        // Default orientation: facing −Z, right = +X, up = +Y.
+        let mut cam = Camera::new([0., 0., 0.], FRAC_PI_2, 1.0);
+        cam.translate(0.0, 3.0, 0.0); // strafe right
+        assert!(
+            vec_approx_eq(cam.position, [3.0, 0.0, 0.0]),
+            "strafing right should move +X, got {:?}", cam.position,
+        );
+
+        let mut cam = Camera::new([0., 0., 0.], FRAC_PI_2, 1.0);
+        cam.translate(0.0, 0.0, 2.0); // move up
+        assert!(
+            vec_approx_eq(cam.position, [0.0, 2.0, 0.0]),
+            "moving up should move +Y, got {:?}", cam.position,
+        );
+    }
+
+    /// At every orientation, forward/right/up must be mutually perpendicular
+    /// unit vectors. Non-orthonormal bases skew the image and break intersection
+    /// distances.
+    #[test]
+    fn test_basis_is_orthonormal() {
+        let cases = [
+            (0.0_f32, 0.0_f32),  // default
+            (FRAC_PI_2, 0.0),    // 90° yaw
+            (0.0, 1.0),          // steep upward pitch
+            (0.0, -1.0),         // steep downward pitch
+            (0.7, 0.4),          // arbitrary
+        ];
+        for (yaw, pitch) in cases {
+            let mut cam = Camera::new([0., 0., 0.], FRAC_PI_2, 1.0);
+            cam.pan(yaw, pitch);
+            let (fwd, rgt, up) = cam.basis();
+
+            // All three must be unit-length.
+            assert!(approx_eq(dot(fwd, fwd).sqrt(), 1.0),
+                "fwd not unit at yaw={yaw} pitch={pitch}: {:.5}", dot(fwd, fwd).sqrt());
+            assert!(approx_eq(dot(rgt, rgt).sqrt(), 1.0),
+                "rgt not unit at yaw={yaw} pitch={pitch}");
+            assert!(approx_eq(dot(up, up).sqrt(), 1.0),
+                "up not unit at yaw={yaw} pitch={pitch}");
+
+            // All pairs must be mutually perpendicular.
+            assert!(approx_eq(dot(fwd, rgt), 0.0),
+                "fwd · rgt = {:.5} at yaw={yaw} pitch={pitch}", dot(fwd, rgt));
+            assert!(approx_eq(dot(fwd, up), 0.0),
+                "fwd · up = {:.5} at yaw={yaw} pitch={pitch}", dot(fwd, up));
+            assert!(approx_eq(dot(rgt, up), 0.0),
+                "rgt · up = {:.5} at yaw={yaw} pitch={pitch}", dot(rgt, up));
+        }
+    }
+
+    /// The right vector is defined as [cos(yaw), 0, sin(yaw)] — no Y component,
+    /// ever. This guarantees that strafing is always horizontal regardless of
+    /// how far the player is looking up or down (FPS camera convention).
+    #[test]
+    fn test_right_vector_has_no_y_component() {
+        for pitch in [-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
+            let mut cam = Camera::new([0., 0., 0.], FRAC_PI_2, 1.0);
+            cam.pan(0.0, pitch);
+            let (_, rgt, _) = cam.basis();
+            assert!(
+                approx_eq(rgt[1], 0.0),
+                "right vector Y should be 0 at pitch={pitch}, got {}", rgt[1],
+            );
+        }
+    }
+
     /// No matter how violently the user swipes the mouse, pitch must never
     /// exceed MAX_PITCH. Flipping the camera upside-down would be disorienting
     /// and also slightly break the basis math.

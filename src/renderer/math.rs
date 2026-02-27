@@ -201,4 +201,77 @@ mod tests {
         let result = mad(a, b, 2.0);
         assert!(vec_eq(result, [3.0, 2.0, 1.0]));
     }
+
+    /// add, sub, and scale are the most-used primitives in the renderer —
+    /// verify them before anything that depends on them.
+    #[test]
+    fn test_add_sub_scale() {
+        let a = [1.0_f32, 2.0, 3.0];
+        let b = [4.0_f32, 5.0, 6.0];
+        assert!(vec_eq(add(a, b), [5.0, 7.0, 9.0]));
+        assert!(vec_eq(sub(a, b), [-3.0, -3.0, -3.0]));
+        assert!(vec_eq(scale(a, 2.0), [2.0, 4.0, 6.0]));
+        assert!(vec_eq(scale(b, 0.0), [0.0, 0.0, 0.0]));
+    }
+
+    /// The dot product encodes the cosine relationship between vectors.
+    /// Antiparallel unit vectors → −1, perpendicular → 0, parallel → 1.
+    #[test]
+    fn test_dot_product_properties() {
+        assert!(approx_eq(dot([1.,0.,0.], [-1.,0.,0.]), -1.0), "antiparallel should be -1");
+        assert!(approx_eq(dot([1.,0.,0.], [ 0.,1.,0.]),  0.0), "perpendicular should be 0");
+        assert!(approx_eq(dot([0.,0.,1.], [ 0.,0.,1.]),  1.0), "parallel should be 1");
+        // Commutativity: dot(a, b) = dot(b, a).
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        assert!(approx_eq(dot(a, b), dot(b, a)));
+    }
+
+    /// Parallel vectors span no area, so cross(a, a) = 0.
+    /// Also verifies anticommutativity: cross(a, b) = −cross(b, a).
+    #[test]
+    fn test_cross_parallel_vectors_and_anticommutativity() {
+        assert!(vec_eq(cross([1.,0.,0.], [2.,0.,0.]), [0.,0.,0.]),
+            "parallel vectors should give the zero vector");
+        assert!(vec_eq(cross([1.,1.,1.], [3.,3.,3.]), [0.,0.,0.]),
+            "collinear non-unit vectors should also give zero");
+
+        // Anticommutativity: a × b = −(b × a).
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        let ab = cross(a, b);
+        let ba = cross(b, a);
+        assert!(vec_eq(ab, [-ba[0], -ba[1], -ba[2]]),
+            "cross(a,b) should equal -cross(b,a)");
+    }
+
+    /// A ray hitting a surface dead-on (incident along the normal) must bounce
+    /// straight back. This is the simplest case of the reflection formula.
+    #[test]
+    fn test_reflect_perpendicular_incidence() {
+        let incident  = [0.0,  -1.0, 0.0]; // straight down
+        let normal    = [0.0,   1.0, 0.0]; // upward-facing surface
+        let reflected = reflect(incident, normal);
+        assert!(vec_eq(reflected, [0.0, 1.0, 0.0]),
+            "perpendicular hit should reflect straight back, got {:?}", reflected);
+    }
+
+    /// Fresnel at an intermediate angle (cos θ = 0.5, i.e. 60°) must lie
+    /// strictly between f0 and 1 and match the Schlick formula exactly.
+    #[test]
+    fn test_fresnel_intermediate_angle() {
+        let f0 = [0.04_f32, 0.04, 0.04];
+        // Schlick at cos=0.5: f0 + (1−f0) × (1−0.5)^5 = 0.04 + 0.96 × 1/32 = 0.07
+        let expected = 0.04 + (1.0 - 0.04) * (1.0_f32 - 0.5).powi(5);
+
+        let result = fresnel_schlick(0.5, f0);
+
+        assert!(result[0] > f0[0],    "fresnel should exceed f0 at 60°");
+        assert!(result[0] < 1.0,      "fresnel should be below 1 at 60°");
+        assert!(approx_eq(result[0], expected),
+            "fresnel at cos=0.5 should be {expected}, got {}", result[0]);
+        // All three channels must be equal (f0 is the same on each channel).
+        assert!(approx_eq(result[0], result[1]) && approx_eq(result[1], result[2]),
+            "all channels should be equal for grey f0, got {:?}", result);
+    }
 }

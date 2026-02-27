@@ -247,6 +247,55 @@ mod tests {
         assert!(t.is_none(), "box beyond t_max should be culled");
     }
 
+    /// A ray with all three direction components non-zero exercises all three
+    /// AABB slabs simultaneously — the case that axis-aligned tests never cover.
+    #[test]
+    fn test_aabb_diagonal_ray_hit() {
+        // Normalized direction [1,1,1]/√3; inv_dir = [√3, √3, √3].
+        let s3 = 3.0_f32.sqrt();
+        let t = ray_aabb(
+            [-5.0, -5.0, -5.0],
+            [s3, s3, s3],
+            0.001, 1e30,
+            [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0],
+        );
+        // Each slab: t_near = (-1−(−5))×√3 = 4√3; t_far = (1−(−5))×√3 = 6√3
+        let expected = 4.0 * s3;
+        assert!(t.is_some(), "diagonal ray should hit the unit cube");
+        assert!(approx_eq(t.unwrap(), expected),
+            "entry should be 4√3 ≈ {expected:.3}, got {:?}", t);
+    }
+
+    /// Same diagonal direction but offset so it clears the box.
+    #[test]
+    fn test_aabb_diagonal_ray_miss() {
+        let s3 = 3.0_f32.sqrt();
+        // Displaced far in Z — the Z slab is entirely behind when all slabs combined.
+        let t = ray_aabb(
+            [-5.0, -5.0, 10.0],   // Z offset ensures Z slab exits behind origin
+            [s3, s3, s3],
+            0.001, 1e30,
+            [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0],
+        );
+        assert!(t.is_none(), "offset diagonal ray should miss the box");
+    }
+
+    /// A ray traveling in −Z (the default camera direction) uses negative
+    /// inv_dir components and must still hit correctly.
+    #[test]
+    fn test_aabb_negative_direction_ray() {
+        // Direction [0,0,−1]: inv_dir = [∞, ∞, −1].
+        let t = ray_aabb(
+            [0.0, 0.0, 5.0],
+            [f32::INFINITY, f32::INFINITY, -1.0],
+            0.001, 1e30,
+            [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0],
+        );
+        assert!(t.is_some(), "ray in −Z should hit the box");
+        // Entry: Z slab t1=(−1−5)×(−1)=6, t2=(1−5)×(−1)=4; min=4 → entry at t=4.
+        assert!(approx_eq(t.unwrap(), 4.0), "should enter at t=4, got {:?}", t);
+    }
+
     // ---- ray_triangle tests ----
 
     /// A ray fired perpendicularly at a flat triangle should hit at t = distance.
@@ -337,6 +386,56 @@ mod tests {
             1e30,
         );
         assert!(hit.is_none(), "hit before t_min should be rejected");
+    }
+
+    /// A ray aimed directly at a vertex (u=0, v=0 → w=1) must register a hit.
+    /// Vertices are boundary cases of the u/v guards in Möller–Trumbore.
+    #[test]
+    fn test_triangle_vertex_hit() {
+        let v0 = [0.0, 0.0, -2.0];
+        let v1 = [2.0, 0.0, -2.0];
+        let v2 = [0.0, 2.0, -2.0];
+        // Ray aimed straight at v0 — barycentrics should be u=0, v=0.
+        let hit = ray_triangle(
+            [0.0, 0.0, 0.0], [0.0, 0.0, -1.0],
+            v0, v1, v2, 0.001, 1e30,
+        );
+        assert!(hit.is_some(), "ray at v0 should hit the triangle");
+        let (t, u, v) = hit.unwrap();
+        assert!(approx_eq(t, 2.0), "t should be 2.0, got {t}");
+        assert!(approx_eq(u, 0.0) && approx_eq(v, 0.0),
+            "vertex hit should have u=v=0, got u={u} v={v}");
+    }
+
+    /// A hit at t=10 should be rejected when t_max=5 (symmetry with the
+    /// t_min test above).
+    #[test]
+    fn test_triangle_t_above_t_max_rejected() {
+        let v0 = [-1.0, -1.0, -10.0];
+        let v1 = [ 1.0, -1.0, -10.0];
+        let v2 = [ 0.0,  1.0, -10.0];
+        let hit = ray_triangle(
+            [0.0, 0.0, 0.0], [0.0, 0.0, -1.0],
+            v0, v1, v2,
+            0.001,
+            5.0,   // t_max = 5, triangle is at t = 10
+        );
+        assert!(hit.is_none(), "hit beyond t_max should be rejected");
+    }
+
+    /// Collinear vertices produce a zero-area triangle. The determinant in
+    /// Möller–Trumbore is zero, triggering the `det < 1e-8` guard.
+    #[test]
+    fn test_triangle_degenerate_collinear() {
+        // All three vertices on the same line — zero area, no valid hit.
+        let v0 = [0.0, 0.0, -2.0];
+        let v1 = [1.0, 0.0, -2.0];
+        let v2 = [2.0, 0.0, -2.0]; // collinear with v0–v1
+        let hit = ray_triangle(
+            [1.0, 0.0, 0.0], [0.0, 0.0, -1.0],
+            v0, v1, v2, 0.001, 1e30,
+        );
+        assert!(hit.is_none(), "degenerate (collinear) triangle should return None");
     }
 
     /// Barycentric coordinates must satisfy u ≥ 0, v ≥ 0, u + v ≤ 1.

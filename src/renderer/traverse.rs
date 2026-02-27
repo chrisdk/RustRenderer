@@ -320,6 +320,58 @@ mod tests {
         }
     }
 
+    /// Two triangles that fit in a single leaf (both ≤ MAX_LEAF_TRIS). The
+    /// leaf loop must update `closest` after the first hit so it rejects the
+    /// farther triangle, not the nearer one.
+    #[test]
+    fn test_closest_hit_in_same_leaf() {
+        let bvh = bvh_from_tris(&[
+            ([-1.,-1.,-1.], [1.,-1.,-1.], [0.,1.,-1.]),  // near  — t = 1
+            ([-1.,-1.,-3.], [1.,-1.,-3.], [0.,1.,-3.]),  // far   — t = 3
+        ]);
+        // Two triangles → one root leaf (MAX_LEAF_TRIS = 4).
+        assert_eq!(bvh.nodes.len(), 1, "two triangles should produce a single leaf");
+
+        let r   = ray(0., 0., 0.,  0., 0., -1.);
+        let hit = intersect_bvh(&bvh, &r, 0.001, 1e30).expect("should hit");
+        assert!(approx_eq(hit.t, 1.0),
+            "leaf loop should return the nearer hit (t=1), got t={}", hit.t);
+    }
+
+    /// A ray that is not aligned with any world axis exercises all three AABB
+    /// slab tests simultaneously during BVH traversal.
+    #[test]
+    fn test_diagonal_ray_hits_geometry() {
+        let bvh = bvh_from_tris(&[
+            ([-1.,-1.,-5.], [1.,-1.,-5.], [0.,1.,-5.]),
+        ]);
+        // Slightly diagonal so the ray still passes through the triangle center.
+        let r = ray(0., 0., 0.,  0.1, 0.1, -5.0);
+        assert!(intersect_bvh(&bvh, &r, 0.001, 1e30).is_some(),
+            "diagonal ray should hit the triangle");
+    }
+
+    /// After a hit is found, t_max shrinks. A second triangle that would only
+    /// be hit at t > closest must be pruned. Arrange two triangles so one is
+    /// clearly closer; then clamp t_max just below the far triangle to confirm
+    /// it is never returned.
+    #[test]
+    fn test_t_max_shrinks_prunes_farther_hits() {
+        let bvh = bvh_from_tris(&[
+            ([-1.,-1., -2.], [1.,-1., -2.], [0.,1., -2.]),  // near — t=2
+            ([-1.,-1.,-10.], [1.,-1.,-10.], [0.,1.,-10.]),  // far  — t=10
+        ]);
+        let r = ray(0., 0., 0.,  0., 0., -1.);
+
+        // With t_max=5 the far triangle must be culled; near must still hit.
+        let hit = intersect_bvh(&bvh, &r, 0.001, 5.0).expect("near triangle should hit");
+        assert!(approx_eq(hit.t, 2.0), "should return near hit (t=2), got {}", hit.t);
+
+        // With t_max=1 even the near triangle is culled.
+        assert!(intersect_bvh(&bvh, &r, 0.001, 1.0).is_none(),
+            "both triangles should be culled when t_max=1");
+    }
+
     /// After a hit, reconstructing the position from barycentric coordinates
     /// must match `origin + t * direction`. This validates that (t, u, v)
     /// are internally consistent.

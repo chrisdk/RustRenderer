@@ -605,6 +605,113 @@ mod tests {
         assert!((tri.v1[0] - 11.0).abs() < 1e-5, "v1.x = {}, want 11", tri.v1[0]);
     }
 
+    /// Pre-order invariant: for every internal node at index `i`, the left child
+    /// is at `i + 1`. This is load-bearing — the traversal code (and the GPU
+    /// shader) relies on it and never stores the left child index explicitly.
+    #[test]
+    fn test_left_child_always_at_parent_plus_one() {
+        // 5 triangles forces at least one split (MAX_LEAF_TRIS = 4).
+        let scene = scene_from_triangles(&[
+            ([ 0., 0., 0.], [ 1., 0., 0.], [ 0., 1., 0.]),
+            ([ 3., 0., 0.], [ 4., 0., 0.], [ 3., 1., 0.]),
+            ([ 6., 0., 0.], [ 7., 0., 0.], [ 6., 1., 0.]),
+            ([ 9., 0., 0.], [10., 0., 0.], [ 9., 1., 0.]),
+            ([12., 0., 0.], [13., 0., 0.], [12., 1., 0.]),
+        ]);
+        let bvh = Bvh::build(&scene);
+
+        for (idx, node) in bvh.nodes.iter().enumerate() {
+            if node.count != 0 { continue; } // leaf — no children to check
+
+            // Left child must be the very next node in the array.
+            assert!(idx + 1 < bvh.nodes.len(),
+                "internal node {idx}: no room for left child at idx+1");
+
+            // Right child index must be in-bounds and strictly after the left child.
+            let right = node.right_or_first as usize;
+            assert!(right < bvh.nodes.len(),
+                "internal node {idx}: right_or_first ({right}) out of bounds");
+            assert!(right > idx + 1,
+                "internal node {idx}: right child ({right}) must follow left child ({})",
+                idx + 1);
+        }
+    }
+
+    /// With exactly MAX_LEAF_TRIS triangles the root should be one leaf.
+    /// One more triangle must trigger a split into at least two nodes.
+    /// This pins the split-threshold boundary so refactoring can't silently
+    /// change when leaves are created.
+    #[test]
+    fn test_split_at_max_leaf_tris_boundary() {
+        let make_scene = |n: usize| {
+            let tris: Vec<_> = (0..n).map(|i| {
+                let x = i as f32 * 2.0;
+                ([x, 0., 0.], [x+1., 0., 0.], [x, 1., 0.])
+            }).collect();
+            scene_from_triangles(&tris)
+        };
+
+        // Exactly MAX_LEAF_TRIS — should be a single leaf.
+        let bvh4 = Bvh::build(&make_scene(MAX_LEAF_TRIS));
+        assert_eq!(bvh4.nodes.len(), 1,
+            "{MAX_LEAF_TRIS} triangles should produce a single root leaf");
+        assert_eq!(bvh4.nodes[0].count as usize, MAX_LEAF_TRIS,
+            "root leaf should hold all {MAX_LEAF_TRIS} triangles");
+
+        // One over — must split.
+        let bvh5 = Bvh::build(&make_scene(MAX_LEAF_TRIS + 1));
+        assert!(bvh5.nodes.len() > 1,
+            "{} triangles must produce at least one internal node", MAX_LEAF_TRIS + 1);
+        assert_eq!(bvh5.nodes[0].count, 0,
+            "root of a split tree should be an internal node (count=0)");
+    }
+
+    /// Triangle reordering during BVH construction must preserve each triangle's
+    /// material_index. If this breaks, triangles render with the wrong material.
+    #[test]
+    fn test_material_index_preserved() {
+        // Two meshes with different material indices, placed far apart so the
+        // BVH will put them in separate leaves after splitting.
+        let vertices = vec![
+            Vertex { position: [ 0., 0., 0.], normal:[0.,1.,0.], uv:[0.,0.], tangent:[1.,0.,0.,1.] },
+            Vertex { position: [ 1., 0., 0.], normal:[0.,1.,0.], uv:[1.,0.], tangent:[1.,0.,0.,1.] },
+            Vertex { position: [ 0., 1., 0.], normal:[0.,1.,0.], uv:[0.,1.], tangent:[1.,0.,0.,1.] },
+            Vertex { position: [10., 0., 0.], normal:[0.,1.,0.], uv:[0.,0.], tangent:[1.,0.,0.,1.] },
+            Vertex { position: [11., 0., 0.], normal:[0.,1.,0.], uv:[1.,0.], tangent:[1.,0.,0.,1.] },
+            Vertex { position: [10., 1., 0.], normal:[0.,1.,0.], uv:[0.,1.], tangent:[1.,0.,0.,1.] },
+        ];
+        let identity = [
+            [1.0_f32, 0., 0., 0.], [0.0_f32, 1., 0., 0.],
+            [0.0_f32, 0., 1., 0.], [0.0_f32, 0., 0., 1.],
+        ];
+        let scene = Scene {
+            vertices,
+            indices:   vec![0, 1, 2,  3, 4, 5],
+            meshes:    vec![
+                Mesh { first_index: 0, index_count: 3, material_index: 0 },
+                Mesh { first_index: 3, index_count: 3, material_index: 7 }, // non-zero material
+            ],
+            instances: vec![
+                MeshInstance { mesh_index: 0, transform: identity },
+                MeshInstance { mesh_index: 1, transform: identity },
+            ],
+            materials:   vec![Material::default(); 8],
+            textures:    Vec::new(),
+            environment: None,
+        };
+
+        let bvh = Bvh::build(&scene);
+        assert_eq!(bvh.triangles.len(), 2);
+
+        for tri in &bvh.triangles {
+            let cx = (tri.v0[0] + tri.v1[0] + tri.v2[0]) / 3.0;
+            let expected_mat = if cx < 5.0 { 0 } else { 7 };
+            assert_eq!(tri.material_index, expected_mat,
+                "triangle at centroid x≈{cx:.1} should have material {expected_mat}, \
+                 got {}", tri.material_index);
+        }
+    }
+
     /// Two instances of the same mesh should each contribute their own triangle
     /// to the BVH. This verifies that instancing is expanded correctly.
     #[test]
