@@ -30,15 +30,31 @@ const hintsEl      = document.getElementById('hints')!;
 const dropOverlay  = document.getElementById('drop-overlay')!;
 const scenePicker  = document.getElementById('scene-picker')!;
 const renderBtn    = document.getElementById('render-btn')  as HTMLButtonElement;
+const speedDownBtn = document.getElementById('speed-down')  as HTMLButtonElement;
+const speedUpBtn   = document.getElementById('speed-up')    as HTMLButtonElement;
+const speedDisplay = document.getElementById('speed-display')!;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Camera state
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MAX_PITCH = Math.PI / 2 - 0.001;  // matches Rust constant
-const VFOV      = Math.PI / 3;           // 60° vertical FOV
-const MOVE_SPEED = 0.08;                 // world units per frame
-const LOOK_SPEED = 0.002;               // radians per pixel of mouse movement
+const MAX_PITCH  = Math.PI / 2 - 0.001;  // matches Rust constant
+const VFOV       = Math.PI / 3;           // 60° vertical FOV
+const LOOK_SPEED = 0.002;                // radians per pixel of mouse movement
+
+// ── Move speed ────────────────────────────────────────────────────────────────
+// baseSpeed is computed from the scene's bounding-box diagonal so that
+// navigating any scene feels similarly fluid regardless of real-world scale.
+// The user can then nudge it up or down with the panel widget.
+//
+// Multiplier steps span six doublings so the user can cover the full range
+// from "creeping around a tiny detail" to "flying across a huge environment"
+// without needing a text field.
+
+const SPEED_STEPS = [0.25, 0.5, 1, 2, 4, 8];
+let speedStepIdx  = 2;          // default: 1× (index into SPEED_STEPS)
+let baseSpeed     = 0.08;       // auto-set per scene; fallback for pre-load
+let moveSpeed     = baseSpeed;  // actual value used each frame
 
 const camera = {
     position: [0, 1, 5] as [number, number, number],
@@ -112,6 +128,39 @@ function applyAutoCamera(): void {
     camera.pitch    = 0;
 }
 
+/**
+ * Set the base movement speed from the loaded scene's bounding box.
+ *
+ * We target "traverse the full scene diagonal in ~100 frames" at the 1×
+ * multiplier setting (about 1.7 s at 60 fps). That feels responsive for
+ * close-up inspection without being a blur for larger environments.
+ *
+ * The user's current multiplier step is preserved across scene loads so that
+ * someone who cranked it up for a big scene doesn't have to re-adjust when
+ * swapping to a smaller one — only the baseline changes.
+ */
+function applyAutoSpeed(): void {
+    const b = get_scene_bounds();
+    if (b.length < 6) return;
+
+    const dx = b[3] - b[0];
+    const dy = b[4] - b[1];
+    const dz = b[5] - b[2];
+    const diagonal = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // 1% of the scene diagonal per frame = full diagonal in 100 frames.
+    baseSpeed = Math.max(diagonal * 0.01, 1e-4);
+    moveSpeed = baseSpeed * SPEED_STEPS[speedStepIdx];
+    updateSpeedDisplay();
+}
+
+/** Refresh the speed readout and button states in the panel. */
+function updateSpeedDisplay(): void {
+    speedDisplay.textContent = `${SPEED_STEPS[speedStepIdx]}×`;
+    speedDownBtn.disabled = speedStepIdx === 0;
+    speedUpBtn.disabled   = speedStepIdx === SPEED_STEPS.length - 1;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Input handling
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,12 +198,12 @@ function processMovement(): boolean {
     const { fwd, right, up } = cameraBasis();
     let moved = false;
 
-    if (keysDown.has('KeyW'))      { addScaled(camera.position, fwd,    MOVE_SPEED); moved = true; }
-    if (keysDown.has('KeyS'))      { addScaled(camera.position, fwd,   -MOVE_SPEED); moved = true; }
-    if (keysDown.has('KeyD'))      { addScaled(camera.position, right,  MOVE_SPEED); moved = true; }
-    if (keysDown.has('KeyA'))      { addScaled(camera.position, right, -MOVE_SPEED); moved = true; }
-    if (keysDown.has('Space'))     { addScaled(camera.position, up,     MOVE_SPEED); moved = true; }
-    if (keysDown.has('ShiftLeft')) { addScaled(camera.position, up,    -MOVE_SPEED); moved = true; }
+    if (keysDown.has('KeyW'))      { addScaled(camera.position, fwd,    moveSpeed); moved = true; }
+    if (keysDown.has('KeyS'))      { addScaled(camera.position, fwd,   -moveSpeed); moved = true; }
+    if (keysDown.has('KeyD'))      { addScaled(camera.position, right,  moveSpeed); moved = true; }
+    if (keysDown.has('KeyA'))      { addScaled(camera.position, right, -moveSpeed); moved = true; }
+    if (keysDown.has('Space'))     { addScaled(camera.position, up,     moveSpeed); moved = true; }
+    if (keysDown.has('ShiftLeft')) { addScaled(camera.position, up,    -moveSpeed); moved = true; }
 
     return moved;
 }
@@ -274,6 +323,7 @@ async function loadSceneBytes(
         } else {
             applyAutoCamera();
         }
+        applyAutoSpeed();
         sceneLoaded  = true;
         cameraDirty  = true;
         renderBtn.disabled = false;
@@ -342,6 +392,22 @@ renderBtn.addEventListener('click', () => {
         hqCancelled = true;
     } else {
         startHighQualityRender();
+    }
+});
+
+speedDownBtn.addEventListener('click', () => {
+    if (speedStepIdx > 0) {
+        speedStepIdx--;
+        moveSpeed = baseSpeed * SPEED_STEPS[speedStepIdx];
+        updateSpeedDisplay();
+    }
+});
+
+speedUpBtn.addEventListener('click', () => {
+    if (speedStepIdx < SPEED_STEPS.length - 1) {
+        speedStepIdx++;
+        moveSpeed = baseSpeed * SPEED_STEPS[speedStepIdx];
+        updateSpeedDisplay();
     }
 });
 
@@ -459,7 +525,10 @@ async function main(): Promise<void> {
 
     setStatus('Choose a scene below, or drop a GLTF / GLB file');
 
-    // 4. Start the animation loop.
+    // 4. Initialise the speed widget to its default state.
+    updateSpeedDisplay();
+
+    // 5. Start the animation loop.
     tick();
 }
 
