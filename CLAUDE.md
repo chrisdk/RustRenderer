@@ -32,6 +32,7 @@ src/scene/
 src/accel/
   mod.rs                 Re-exports Bvh
   bvh.rs                 BVH build + BvhNode / BvhTriangle types
+src/camera.rs            Camera + Ray; ray generation and FPS navigation
 www/
   src/index.ts           Loads WASM, wires canvas + controls
   index.html             App shell
@@ -58,6 +59,16 @@ run.sh                   build.sh then python3 HTTP server on :8080
 - `right_or_first: u32` — internal: right child index; leaf: first triangle index
 - `count: u32` — 0 = internal node; >0 = leaf, triangle count
 
+**`Camera`** (`src/camera.rs`) — updated interactively as the user navigates; separate from the static Scene.
+- `position: [f32; 3]`, `yaw: f32`, `pitch: f32`, `vfov: f32`, `aspect: f32`
+- `ray(u, v) -> Ray` — generates a world-space ray for normalized pixel coords; (0,0) = top-left, (1,1) = bottom-right
+- `pan(dyaw, dpitch)` — mouse-look; pitch is clamped to ±(π/2 − 0.001) to prevent flipping
+- `translate(fwd, right, up)` — moves in camera-local space; strafe is always horizontal (no roll)
+- Basis vectors (forward, right, up) are derived analytically from yaw/pitch — no drift, no quaternions
+
+**`Ray`** (`src/camera.rs`):
+- `origin: [f32; 3]`, `direction: [f32; 3]` — direction is always normalized
+
 ## Key architectural decisions
 
 - **Geometry stays in local space.** Transforms are stored per-instance and applied at BVH build time. This enables instancing without duplicating vertex data.
@@ -65,18 +76,18 @@ run.sh                   build.sh then python3 HTTP server on :8080
 - **RGBA8 everywhere.** All textures are normalized to RGBA8 at load time regardless of source format. The GPU never has to handle multiple texture formats.
 - **Pre-order BVH layout.** Left child is always at `node_idx + 1`, so only the right child index needs explicit storage. This matches how GPU traversal stacks work.
 - **Matrices are column-major `[[f32; 4]; 4]`.** This matches GLTF, glam, and WGSL conventions. `m[col][row]`.
+- **Camera basis is derived analytically.** Forward/right/up are computed from yaw and pitch on demand rather than stored. Avoids accumulated floating-point drift from repeated matrix multiplications.
 
 ## What's built
 
 - [x] GLTF scene loader (`Scene::from_gltf`) — geometry, materials, textures, scene graph traversal, instancing
-- [x] BVH construction (`Bvh::build`) — median split on longest axis, flat pre-order layout
-- [x] Unit tests for BVH (7 tests: empty scene, single triangle, AABB containment, leaf coverage, tree invariants, transforms, instancing)
+- [x] BVH construction (`Bvh::build`) — median split on longest axis, flat pre-order layout; 7 unit tests
+- [x] Camera (`Camera`, `Ray`) — ray generation, FPS pan/translate, analytical basis; 6 unit tests
 
 ## What's next
 
-1. **Camera** (`src/camera.rs`) — ray generation from position + orientation; updated interactively by the frontend
-2. **WebGPU pipeline** (`src/renderer/`) — device setup, buffer uploads, WGSL compute shader for path tracing
-3. **Frontend controls** — camera navigation (FPS-style), render trigger button
+1. **WebGPU pipeline** (`src/renderer/`) — device setup, buffer uploads, WGSL compute shader for path tracing
+2. **Frontend controls** — camera navigation (FPS-style WASD + mouse-look), render trigger button
 
 ## Code style
 
