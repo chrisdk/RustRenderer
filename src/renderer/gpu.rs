@@ -23,6 +23,7 @@
 //! have a tight 64 KiB size limit that a real scene would blow past instantly.
 
 use crate::accel::bvh::Bvh;
+use crate::camera::CameraUniform;
 use crate::scene::material::Material;
 
 // ============================================================================
@@ -62,6 +63,16 @@ pub struct Renderer {
     /// WGSL binding: `@group(0) @binding(2) var<storage, read> materials`.
     /// Layout: see [`Material`](crate::scene::material::Material) — 64 bytes each.
     pub(crate) materials_buf: Option<wgpu::Buffer>,
+
+    /// Camera parameters for the current frame, uploaded as a uniform buffer.
+    ///
+    /// Uniform buffers are the right choice here (rather than storage) because
+    /// the camera data is tiny (64 bytes) and read-only in the shader, which
+    /// lets the driver cache it aggressively.
+    ///
+    /// WGSL binding: `@group(1) @binding(0) var<uniform> camera: Camera`.
+    /// Layout: see [`CameraUniform`](crate::camera::CameraUniform) — 64 bytes.
+    pub(crate) camera_buf: Option<wgpu::Buffer>,
 }
 
 // ============================================================================
@@ -136,6 +147,7 @@ impl Renderer {
             bvh_nodes_buf: None,
             bvh_tris_buf:  None,
             materials_buf: None,
+            camera_buf:    None,
         })
     }
 
@@ -208,5 +220,38 @@ impl Renderer {
     /// dispatched until this returns `true`.
     pub fn is_scene_loaded(&self) -> bool {
         self.bvh_nodes_buf.is_some()
+    }
+
+    /// Uploads (or updates) the camera uniform buffer.
+    ///
+    /// On the first call the buffer is allocated and filled. On every
+    /// subsequent call the existing buffer is updated in-place with
+    /// `queue.write_buffer` — no allocation, no pipeline stall. This makes
+    /// it cheap to call every frame as the camera moves around.
+    pub fn upload_camera(&mut self, uniform: &CameraUniform) {
+        let data = bytemuck::bytes_of(uniform);
+
+        match &self.camera_buf {
+            Some(buf) => {
+                // Fast path: just stream the new 64 bytes into the existing buffer.
+                // wgpu stages this into an internal upload buffer and flushes it
+                // before the next submit, so the GPU never sees a half-updated camera.
+                self.queue.write_buffer(buf, 0, data);
+            }
+            None => {
+                use wgpu::util::DeviceExt;
+                self.camera_buf = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label:    Some("camera_uniform"),
+                        contents: data,
+                        // UNIFORM  → the shader sees this as var<uniform>
+                        // COPY_DST → write_buffer can update it each frame
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+            }
+        }
+
+        log::debug!("camera uploaded: pos={:?}", uniform.position);
     }
 }

@@ -21,6 +21,45 @@
 use std::f32::consts::FRAC_PI_2;
 
 // ============================================================================
+// CameraUniform — GPU-side representation
+// ============================================================================
+
+/// A GPU-ready snapshot of the camera, sized and padded for a WGSL uniform buffer.
+///
+/// WGSL requires `vec3<f32>` fields to be 16-byte aligned (same as `vec4`).
+/// We satisfy that by adding a `_pad` float after each vec3, giving four tidy
+/// 16-byte slots and a total size of 64 bytes.
+///
+/// The shader can generate the primary ray for pixel `(u, v)` as:
+/// ```text
+/// dir = fwd + (2u − 1) · rgt_scaled + (1 − 2v) · up_scaled
+/// ray = { origin: position, direction: normalize(dir) }
+/// ```
+/// The `rgt_scaled` / `up_scaled` vectors already have the film-plane half-width
+/// and half-height baked in, so the shader skips that arithmetic.
+///
+/// WGSL binding: `@group(1) @binding(0) var<uniform> camera: Camera`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CameraUniform {
+    /// World-space camera position. `_pad0` pads to 16 bytes.
+    pub position:   [f32; 3],
+    pub _pad0:      f32,
+
+    /// Unit forward vector (the direction the camera is pointing).
+    pub fwd:        [f32; 3],
+    pub _pad1:      f32,
+
+    /// Right vector pre-scaled by `half_width = aspect × tan(vfov / 2)`.
+    pub rgt_scaled: [f32; 3],
+    pub _pad2:      f32,
+
+    /// Up vector pre-scaled by `half_height = tan(vfov / 2)`.
+    pub up_scaled:  [f32; 3],
+    pub _pad3:      f32,
+}
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -159,6 +198,28 @@ impl Camera {
         let (f, r, u_vec) = self.basis();
         for i in 0..3 {
             self.position[i] += fwd * f[i] + right * r[i] + up * u_vec[i];
+        }
+    }
+
+    /// Produces a [`CameraUniform`] ready for upload to a GPU uniform buffer.
+    ///
+    /// Call this whenever the camera moves and pass the result to
+    /// `Renderer::upload_camera`. The heavy-ish trig (sin/cos for yaw and pitch,
+    /// one tangent for the FOV) happens here on the CPU so the shader stays lean.
+    pub fn to_uniform(&self) -> CameraUniform {
+        let half_h = (self.vfov * 0.5).tan();
+        let half_w = self.aspect * half_h;
+        let (fwd, rgt, up) = self.basis();
+
+        CameraUniform {
+            position:   self.position,
+            _pad0:      0.0,
+            fwd,
+            _pad1:      0.0,
+            rgt_scaled: [rgt[0] * half_w, rgt[1] * half_w, rgt[2] * half_w],
+            _pad2:      0.0,
+            up_scaled:  [up[0] * half_h, up[1] * half_h, up[2] * half_h],
+            _pad3:      0.0,
         }
     }
 
@@ -408,6 +469,27 @@ mod tests {
                 "right vector Y should be 0 at pitch={pitch}, got {}", rgt[1],
             );
         }
+    }
+
+    /// CameraUniform must be exactly 64 bytes: four vec3+pad slots at 16 bytes
+    /// each. If this fails, the WGSL uniform binding will silently read garbage.
+    #[test]
+    fn test_camera_uniform_layout() {
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 64);
+    }
+
+    /// to_uniform() must produce a forward vector that matches what ray(0.5, 0.5)
+    /// produces — both represent where the camera is pointing.
+    #[test]
+    fn test_to_uniform_fwd_matches_center_ray() {
+        let cam = Camera::new([0.0, 0.0, 0.0], FRAC_PI_2, 1.0);
+        let u = cam.to_uniform();
+        let ray = cam.ray(0.5, 0.5);
+        assert!(
+            vec_approx_eq(u.fwd, ray.direction),
+            "to_uniform fwd {:?} should match center ray direction {:?}",
+            u.fwd, ray.direction,
+        );
     }
 
     /// No matter how violently the user swipes the mouse, pitch must never
