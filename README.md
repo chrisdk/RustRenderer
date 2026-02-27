@@ -1,5 +1,7 @@
 # RustRenderer
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A physically-based path tracer that runs in the browser. The rendering engine is written in Rust, compiled to WebAssembly, and driven by a TypeScript frontend using WebGPU.
 
 ## What it does
@@ -105,13 +107,21 @@ Early development. What's done:
 - [x] GLTF scene loading (geometry, materials, textures, scene graph / instancing)
 - [x] BVH construction (median split, flat pre-order layout)
 - [x] Camera (ray generation, FPS pan/translate, analytical basis vectors)
-- [x] CPU renderer foundation (math, ray–AABB, ray–triangle, BVH traversal — 68 tests)
+- [x] CPU renderer foundation (math, ray–AABB, ray–triangle, BVH traversal — 70 tests)
 - [x] GPU setup (wgpu device/queue, scene storage buffer upload)
 - [x] Portability: core is frontend-agnostic; WASM glue is isolated to `lib.rs`
+- [x] Camera uniform buffer + WASM API (`init_renderer`, `load_scene`, `update_camera`, `render`, `get_pixels`)
+- [x] WGSL compute shader (BVH traversal + Möller–Trumbore + Lambertian shading)
+- [x] Compute pipeline, bind groups, pixel readback
+- [x] TypeScript frontend (FPS camera, drag-and-drop scene loading, render loop)
 
 In progress / planned:
 
-- [ ] Camera uniform buffer + WASM API (`load_scene`, `update_camera`, `render`)
-- [ ] WGSL path tracing compute shader (port of the CPU traversal)
-- [ ] Compute pipeline, bind groups, dispatch
-- [ ] Frontend controls (FPS-style WASD + mouse-look, render trigger button)
+- [ ] Progressive accumulation (multi-sample with temporal averaging)
+- [ ] Full path tracing (indirect illumination, multiple bounces)
+- [ ] Smooth normals (interpolated from vertex data)
+- [ ] PBR materials (metallic/roughness, emissive)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

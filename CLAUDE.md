@@ -92,14 +92,22 @@ run.sh                   build.sh then python3 HTTP server on :8080
 - [x] CPU renderer (`src/renderer/`) — math helpers, ray–AABB (slab), ray–triangle (Möller–Trumbore), iterative BVH traversal
 - [x] GPU scaffolding (`Renderer`) — wgpu device/queue init, scene storage buffer upload (BVH nodes, triangles, materials)
 - [x] Portability — crate builds as both `cdylib` (WASM) and `rlib` (native); WASM glue is `#[cfg(wasm32)]`-gated throughout
-- 68 unit tests + 1 doctest, all passing (`cargo test`)
+- [x] Camera uniform buffer + WASM API — `init_renderer`, `load_scene`, `update_camera`, `render`, `get_pixels`
+- [x] WGSL compute shader (`src/shaders/trace.wgsl`) — BVH traversal + Möller–Trumbore + Lambertian shading
+- [x] Compute pipeline — bind group layouts, pipeline, `render_frame`, async `get_pixels` readback
+- [x] TypeScript frontend — FPS camera (pointer-lock + WASD), drag-and-drop GLTF loader, `ImageData` render loop
+- 70 unit tests + 1 doctest, all passing (`cargo test`)
 
 ## What's next
 
-1. **Camera uniform buffer** — upload `Camera` state to the GPU; wire `load_scene` / `update_camera` / `render` into `lib.rs`
-2. **WGSL compute shader** (`src/shaders/trace.wgsl`) — port of `traverse.rs` + `intersect.rs`; path tracing main loop
-3. **Compute pipeline** — bind groups, pipeline layout, shader dispatch from `Renderer::render_frame()`
-4. **Frontend controls** — FPS-style WASD + mouse-look, render trigger button
+1. **Progressive accumulation** — keep a running average of samples; reset on camera move
+2. **Full path tracing** — secondary rays, indirect illumination, multiple bounces
+3. **Smooth normals** — interpolate from stored vertex normals using BVH hit barycentrics
+4. **PBR materials** — metallic/roughness BRDF, emissive surfaces
+
+## License
+
+MIT — see `LICENSE`.
 
 ## Code style
 
