@@ -18,7 +18,8 @@ log      = "0.4"   # logging facade; backend differs per target (see below)
 # WebGPU — the whole reason this crate exists.
 # `webgpu` feature enables the browser's native WebGPU backend on wasm32.
 # On native targets wgpu uses Vulkan / Metal / DX12 regardless of this flag.
-wgpu = { version = "22", features = ["webgpu"] }
+wgpu             = { version = "22", features = ["webgpu"] }
+futures-channel  = "0.3"   # lightweight oneshot channel for async buffer mapping
 
 # WASM-only dependencies — not compiled for native targets.
 # wasm-bindgen / wasm-bindgen-futures are pure WASM glue; there is no reason

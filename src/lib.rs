@@ -147,15 +147,16 @@ pub fn update_camera(
     });
 }
 
-/// Dispatches the path-tracing compute shader for one accumulation pass.
+/// Dispatches the path-tracing compute shader for one sample pass.
+///
+/// Writes RGBA8 pixels into an internal GPU buffer. Call [`get_pixels`]
+/// afterwards to read them back.
 ///
 /// Requires both `init_renderer` and `load_scene` to have been called first.
 /// Calling before the scene is loaded is a no-op with a console warning.
-///
-/// This is a placeholder — the compute pipeline and WGSL shader are Phase 3.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn render() {
+pub fn render(width: u32, height: u32) {
     let ready = STATE.with(|s| {
         s.borrow()
             .as_ref()
@@ -167,6 +168,44 @@ pub fn render() {
         return;
     }
 
-    // Phase 3: build compute pipeline, bind groups, and dispatch.
-    log::info!("render() — compute shader not yet implemented (Phase 3)");
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.render_frame(width, height);
+        }
+    });
+}
+
+/// Reads the last rendered frame back from the GPU and returns it as a
+/// `Uint8Array` of raw RGBA8 bytes, suitable for passing to `ImageData`
+/// and drawing to a `<canvas>` element.
+///
+/// Must be called after `render()`. Returns an empty array if no frame has
+/// been rendered yet.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
+    let pixels = STATE.with(|s| {
+        // We need a reference to the renderer outside the RefCell borrow.
+        // SAFETY: We take the renderer out of the Option temporarily via a
+        // raw pointer — but we only hold it for the synchronous setup portion
+        // (creating the staging buffer and submitting the copy command).
+        // The async await happens after the borrow is released.
+        s.borrow()
+            .as_ref()
+            .map(|state| {
+                // Capture the raw pointer; we'll re-borrow through it below.
+                &state.renderer as *const renderer::Renderer
+            })
+    });
+
+    let Some(renderer_ptr) = pixels else {
+        return js_sys::Uint8Array::new_with_length(0);
+    };
+
+    // SAFETY: The renderer lives as long as STATE, and STATE is thread_local.
+    // We don't mutate it here (get_pixels takes &self), and WASM is
+    // single-threaded, so no concurrent access is possible.
+    let renderer = unsafe { &*renderer_ptr };
+    let bytes = renderer.get_pixels(width, height).await;
+    js_sys::Uint8Array::from(bytes.as_slice())
 }
