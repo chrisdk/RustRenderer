@@ -4,52 +4,53 @@
     <meta charset="utf-8">
     <title>Path Tracer</title>
     <style>
-        *, *::before, *::after { box-sizing: border-box; }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            margin: 0;
-            background: #000;
+            display: flex;
+            height: 100vh;
             overflow: hidden;
+            background: #0a0a0a;
             font-family: system-ui, sans-serif;
             color: #fff;
         }
 
-        canvas {
-            display: block;
-            width: 100vw;
+        /* ── Left control panel ────────────────────────────────────────────── */
+
+        #panel {
+            width: 220px;
+            flex-shrink: 0;
             height: 100vh;
-            cursor: crosshair;
-        }
-
-        /* Floating UI sits on top of the canvas */
-        #ui {
-            position: fixed;
-            inset: 0;
-            pointer-events: none; /* let clicks reach the canvas by default */
-        }
-
-        /* ── Status panel (top-left) ───────────────────────────────────────── */
-        #status-panel {
-            position: absolute;
-            top: 16px;
-            left: 16px;
+            background: #111;
+            border-right: 1px solid rgba(255,255,255,0.08);
+            padding: 16px 12px;
             display: flex;
             flex-direction: column;
             gap: 8px;
-            pointer-events: auto;
+            overflow-y: auto;
+        }
+
+        #panel-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.10em;
+            text-transform: uppercase;
+            color: rgba(255,255,255,0.30);
+            padding: 2px 2px 4px;
         }
 
         #status {
-            background: rgba(0,0,0,0.6);
-            border: 1px solid rgba(255,255,255,0.15);
+            font-size: 12px;
+            line-height: 1.5;
+            color: rgba(255,255,255,0.60);
+            padding: 8px 10px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
             border-radius: 6px;
-            padding: 6px 12px;
-            font-size: 13px;
-            line-height: 1.4;
-            backdrop-filter: blur(4px);
         }
 
         /* ── Scene picker ──────────────────────────────────────────────────── */
+
         #scene-picker {
             display: flex;
             flex-direction: column;
@@ -57,90 +58,114 @@
         }
 
         #scene-picker-label {
-            font-size: 11px;
+            font-size: 10px;
+            font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: rgba(255,255,255,0.45);
-            padding: 0 2px;
+            letter-spacing: 0.10em;
+            color: rgba(255,255,255,0.30);
+            padding: 6px 2px 2px;
         }
 
         .scene-btn {
-            align-self: flex-start;
-            background: rgba(255,255,255,0.10);
-            border: 1px solid rgba(255,255,255,0.20);
-            border-radius: 6px;
-            color: #fff;
-            cursor: pointer;
-            font-size: 13px;
-            padding: 6px 14px;
-            backdrop-filter: blur(4px);
-            transition: background 0.15s;
             width: 100%;
             text-align: left;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 6px;
+            color: #ddd;
+            cursor: pointer;
+            font-size: 13px;
+            padding: 7px 10px;
+            transition: background 0.12s;
         }
-        .scene-btn:hover  { background: rgba(255,255,255,0.20); }
-        .scene-btn.active { background: rgba(255,255,255,0.28);
-                            border-color: rgba(255,255,255,0.50); }
+        .scene-btn:hover  { background: rgba(255,255,255,0.12); color: #fff; }
+        .scene-btn.active { background: rgba(255,255,255,0.15);
+                            border-color: rgba(255,255,255,0.35); color: #fff; }
 
         /* ── Render button ─────────────────────────────────────────────────── */
+
         #render-btn {
-            align-self: flex-start;
-            background: rgba(80, 140, 255, 0.25);
-            border: 1px solid rgba(120, 170, 255, 0.50);
+            width: 100%;
+            text-align: center;
+            background: rgba(70, 130, 255, 0.22);
+            border: 1px solid rgba(110, 165, 255, 0.45);
             border-radius: 6px;
             color: #fff;
             cursor: pointer;
             font-size: 13px;
-            font-weight: 500;
-            padding: 7px 16px;
-            backdrop-filter: blur(4px);
-            transition: background 0.15s;
-            width: 100%;
-            text-align: left;
+            font-weight: 600;
+            padding: 9px 10px;
+            transition: background 0.12s;
+            margin-top: 4px;
         }
-        #render-btn:hover    { background: rgba(80, 140, 255, 0.40); }
-        #render-btn:disabled { opacity: 0.35; cursor: default; }
-        #render-btn.cancel   { background: rgba(220, 80, 60, 0.30);
-                               border-color: rgba(255, 120, 100, 0.50); }
-        #render-btn.cancel:hover { background: rgba(220, 80, 60, 0.45); }
+        #render-btn:hover    { background: rgba(70, 130, 255, 0.38); }
+        #render-btn:disabled { opacity: 0.30; cursor: default; }
+        #render-btn.cancel   { background: rgba(210, 65, 45, 0.28);
+                               border-color: rgba(255, 105, 85, 0.45); }
+        #render-btn.cancel:hover { background: rgba(210, 65, 45, 0.44); }
+
+        /* ── Divider ───────────────────────────────────────────────────────── */
+
+        .divider {
+            height: 1px;
+            background: rgba(255,255,255,0.07);
+            margin: 4px 0;
+        }
+
+        /* ── Load file ─────────────────────────────────────────────────────── */
 
         #load-btn {
-            align-self: flex-start;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.18);
-            border-radius: 6px;
-            color: rgba(255,255,255,0.7);
+            display: block;
+            text-align: center;
+            color: rgba(255,255,255,0.35);
+            font-size: 11px;
             cursor: pointer;
-            font-size: 12px;
-            padding: 5px 12px;
-            backdrop-filter: blur(4px);
-            transition: background 0.15s;
-            display: inline-block;
+            padding: 5px;
+            border-radius: 4px;
+            transition: color 0.12s;
         }
-        #load-btn:hover { background: rgba(255,255,255,0.14); }
+        #load-btn:hover { color: rgba(255,255,255,0.65); }
 
-        /* hidden file input wired to the label */
         #file-input { display: none; }
 
-        /* ── Controls hint (bottom-center) ────────────────────────────────── */
+        /* ── Canvas area (right side) ──────────────────────────────────────── */
+
+        #canvas-wrap {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            background: #000;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+        }
+
+        /* ── Controls hint (bottom-centre of canvas) ───────────────────────── */
+
         #hints {
             position: absolute;
-            bottom: 16px;
+            bottom: 14px;
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0,0,0,0.55);
-            border: 1px solid rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.10);
             border-radius: 6px;
-            padding: 6px 16px;
-            font-size: 12px;
-            color: rgba(255,255,255,0.7);
+            padding: 5px 14px;
+            font-size: 11px;
+            color: rgba(255,255,255,0.55);
             white-space: nowrap;
+            pointer-events: none;
             backdrop-filter: blur(4px);
             transition: opacity 0.5s;
         }
         #hints.fade { opacity: 0; }
 
-        /* ── Drag-and-drop overlay ─────────────────────────────────────────── */
+        /* ── Drag-and-drop overlay (covers canvas area only) ───────────────── */
+
         #drop-overlay {
             position: absolute;
             inset: 0;
@@ -148,36 +173,44 @@
             align-items: center;
             justify-content: center;
             background: rgba(0,0,0,0.55);
-            font-size: 22px;
+            font-size: 20px;
             font-weight: 500;
-            letter-spacing: 0.02em;
-            border: 3px dashed rgba(255,255,255,0.4);
-            border-radius: 12px;
-            margin: 24px;
+            border: 3px dashed rgba(255,255,255,0.35);
+            border-radius: 10px;
+            margin: 20px;
+            pointer-events: none;
         }
         #drop-overlay.active { display: flex; }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div id="panel">
+        <div id="panel-title">Path Tracer</div>
 
-    <div id="ui">
-        <div id="status-panel">
-            <div id="status">Initializing WebGPU…</div>
-            <div id="scene-picker">
-                <div id="scene-picker-label">Built-in scenes</div>
-                <!-- Buttons injected here by index.ts -->
-            </div>
-            <button id="render-btn" disabled>Render</button>
-            <label id="load-btn" for="file-input">Load file…</label>
-            <input id="file-input" type="file" accept=".gltf,.glb">
+        <div id="status">Initializing…</div>
+
+        <div id="scene-picker">
+            <div id="scene-picker-label">Scenes</div>
+            <!-- buttons injected by index.ts -->
         </div>
 
+        <div class="divider"></div>
+
+        <button id="render-btn" disabled>Render</button>
+
+        <div class="divider"></div>
+
+        <label id="load-btn" for="file-input">Load GLB / GLTF…</label>
+        <input id="file-input" type="file" accept=".gltf,.glb">
+    </div>
+
+    <div id="canvas-wrap">
+        <canvas id="canvas"></canvas>
+
         <div id="hints">
-            Click canvas to look around &nbsp;·&nbsp;
-            WASD to move &nbsp;·&nbsp;
-            Space / Shift to fly up / down &nbsp;·&nbsp;
-            Esc to release mouse
+            Click to look around &nbsp;·&nbsp;
+            WASD / Space / Shift &nbsp;·&nbsp;
+            Esc to release
         </div>
 
         <div id="drop-overlay">Drop GLTF / GLB here</div>

@@ -137,11 +137,12 @@ const HQ_SAMPLES = 256;     // samples per pixel for a full quality render
 // ─────────────────────────────────────────────────────────────────────────────
 
 function resizeCanvas(): void {
-    // Match the canvas's backing-store resolution to its CSS display size
-    // (which is 100vw × 100vh set in CSS). devicePixelRatio isn't used here
-    // because the path tracer resolution is already bounded by GPU perf.
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    // Read the canvas's CSS-rendered size. The canvas element fills its
+    // flex container (#canvas-wrap), which takes up the window minus the
+    // control panel, so clientWidth/clientHeight give the right dimensions
+    // without any hardcoded panel-width arithmetic.
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
     if (canvas.width !== w || canvas.height !== h) {
         canvas.width  = w;
         canvas.height = h;
