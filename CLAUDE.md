@@ -22,7 +22,7 @@ The WASM API (in `src/lib.rs`) exposes three steps:
 ## Module map
 
 ```
-src/lib.rs               WASM entry point; #[wasm_bindgen] exports
+src/lib.rs               WASM entry point; #[cfg_attr(wasm32, wasm_bindgen)] exports
 src/scene/
   mod.rs                 Scene struct + from_gltf() loader
   geometry.rs            Vertex, Mesh, MeshInstance
@@ -33,6 +33,12 @@ src/accel/
   mod.rs                 Re-exports Bvh
   bvh.rs                 BVH build + BvhNode / BvhTriangle types
 src/camera.rs            Camera + Ray; ray generation and FPS navigation
+src/renderer/
+  mod.rs                 Re-exports Renderer, HitRecord, intersect_bvh
+  gpu.rs                 Renderer struct — wgpu device/queue + scene storage buffers
+  math.rs                dot, cross, reflect, fresnel_schlick
+  intersect.rs           ray_aabb (slab method) + ray_triangle (Möller–Trumbore)
+  traverse.rs            intersect_bvh — iterative BVH traversal, returns HitRecord
 www/
   src/index.ts           Loads WASM, wires canvas + controls
   index.html             App shell
@@ -81,13 +87,19 @@ run.sh                   build.sh then python3 HTTP server on :8080
 ## What's built
 
 - [x] GLTF scene loader (`Scene::from_gltf`) — geometry, materials, textures, scene graph traversal, instancing
-- [x] BVH construction (`Bvh::build`) — median split on longest axis, flat pre-order layout; 7 unit tests
-- [x] Camera (`Camera`, `Ray`) — ray generation, FPS pan/translate, analytical basis; 6 unit tests
+- [x] BVH construction (`Bvh::build`) — median split on longest axis, flat pre-order layout
+- [x] Camera (`Camera`, `Ray`) — ray generation, FPS pan/translate, analytical basis vectors
+- [x] CPU renderer (`src/renderer/`) — math helpers, ray–AABB (slab), ray–triangle (Möller–Trumbore), iterative BVH traversal
+- [x] GPU scaffolding (`Renderer`) — wgpu device/queue init, scene storage buffer upload (BVH nodes, triangles, materials)
+- [x] Portability — crate builds as both `cdylib` (WASM) and `rlib` (native); WASM glue is `#[cfg(wasm32)]`-gated throughout
+- 68 unit tests + 1 doctest, all passing (`cargo test`)
 
 ## What's next
 
-1. **WebGPU pipeline** (`src/renderer/`) — device setup, buffer uploads, WGSL compute shader for path tracing
-2. **Frontend controls** — camera navigation (FPS-style WASD + mouse-look), render trigger button
+1. **Camera uniform buffer** — upload `Camera` state to the GPU; wire `load_scene` / `update_camera` / `render` into `lib.rs`
+2. **WGSL compute shader** (`src/shaders/trace.wgsl`) — port of `traverse.rs` + `intersect.rs`; path tracing main loop
+3. **Compute pipeline** — bind groups, pipeline layout, shader dispatch from `Renderer::render_frame()`
+4. **Frontend controls** — FPS-style WASD + mouse-look, render trigger button
 
 ## Code style
 

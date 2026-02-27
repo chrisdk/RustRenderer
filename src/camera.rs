@@ -64,6 +64,8 @@ pub struct Ray {
 /// # Example
 ///
 /// ```rust
+/// use render::camera::Camera;
+/// use std::f32::consts::PI;
 /// let mut cam = Camera::new([0.0, 1.0, 5.0], PI / 3.0, 16.0 / 9.0);
 /// // look slightly to the right and move forward a bit
 /// cam.pan(0.3, 0.0);

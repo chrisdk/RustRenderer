@@ -4,26 +4,33 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+# cdylib  → the .wasm binary consumed by wasm-pack / the browser
+# rlib    → a normal Rust library artifact so other Rust crates can depend on
+#           this one (native viewer, CLI renderer, integration tests, etc.)
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen          = "0.2"
-wasm-bindgen-futures  = "0.4"   # async fn across the WASM boundary
-gltf                  = "1"
-glam                  = "0.29"
-bytemuck              = { version = "1", features = ["derive"] }
-log                   = "0.4"   # logging facade; backend differs per target
+gltf     = "1"
+glam     = "0.29"
+bytemuck = { version = "1", features = ["derive"] }
+log      = "0.4"   # logging facade; backend differs per target (see below)
 
 # WebGPU — the whole reason this crate exists.
 # `webgpu` feature enables the browser's native WebGPU backend on wasm32.
-# On native targets wgpu uses Vulkan / Metal / DX12 regardless.
+# On native targets wgpu uses Vulkan / Metal / DX12 regardless of this flag.
 wgpu = { version = "22", features = ["webgpu"] }
 
-# WASM-only: DOM access for canvas and browser console logging.
+# WASM-only dependencies — not compiled for native targets.
+# wasm-bindgen / wasm-bindgen-futures are pure WASM glue; there is no reason
+# to pull them in when building a native viewer or running `cargo test`.
+# The corresponding attributes in lib.rs are gated with cfg_attr so they
+# only appear in the AST when compiling for wasm32.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys                     = "0.3"
-console_log                = "1"   # routes `log::` macros to console.log()
-console_error_panic_hook   = "0.1" # turns Rust panics into readable JS errors
+wasm-bindgen         = "0.2"
+wasm-bindgen-futures = "0.4"   # async fn across the WASM boundary
+js-sys               = "0.3"
+console_log          = "1"     # routes log:: macros to console.log()
+console_error_panic_hook = "0.1"  # turns Rust panics into readable JS errors
 web-sys = { version = "0.3", features = [
     "Document",
     "HtmlCanvasElement",

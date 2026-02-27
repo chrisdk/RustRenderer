@@ -30,6 +30,12 @@ src/              Rust rendering engine
     material.rs   PBR material (metallic/roughness workflow)
     texture.rs    Texture (all formats normalized to RGBA8)
     environment.rs  HDRI environment map + tint
+  camera.rs       Camera + Ray; ray generation and FPS-style navigation
+  renderer/       GPU renderer
+    gpu.rs        Renderer struct — device, queue, scene storage buffers
+    math.rs       Vector math helpers (dot, cross, reflect, Fresnel)
+    intersect.rs  Ray–AABB and ray–triangle intersection (slab + Möller–Trumbore)
+    traverse.rs   Iterative BVH traversal; produces a HitRecord per ray
 www/              TypeScript frontend
   src/index.ts    Loads the WASM module, wires up the canvas and controls
   index.html      Single-page app shell
@@ -97,11 +103,15 @@ GLTF sample scenes are available from the [Khronos GLTF Sample Assets](https://g
 Early development. What's done:
 
 - [x] GLTF scene loading (geometry, materials, textures, scene graph / instancing)
-- [x] BVH construction with unit tests
+- [x] BVH construction (median split, flat pre-order layout)
+- [x] Camera (ray generation, FPS pan/translate, analytical basis vectors)
+- [x] CPU renderer foundation (math, ray–AABB, ray–triangle, BVH traversal — 68 tests)
+- [x] GPU setup (wgpu device/queue, scene storage buffer upload)
+- [x] Portability: core is frontend-agnostic; WASM glue is isolated to `lib.rs`
 
 In progress / planned:
 
-- [ ] Camera
-- [ ] WebGPU pipeline setup and buffer upload
-- [ ] WGSL path tracing compute shader
-- [ ] Frontend controls (camera navigation, render trigger)
+- [ ] Camera uniform buffer + WASM API (`load_scene`, `update_camera`, `render`)
+- [ ] WGSL path tracing compute shader (port of the CPU traversal)
+- [ ] Compute pipeline, bind groups, dispatch
+- [ ] Frontend controls (FPS-style WASD + mouse-look, render trigger button)
