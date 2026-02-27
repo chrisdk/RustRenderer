@@ -117,6 +117,14 @@ function processMovement(): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Render loop state  (declared before resizeCanvas so the TDZ doesn't bite)
+// ─────────────────────────────────────────────────────────────────────────────
+
+let sceneLoaded  = false;
+let cameraDirty  = false;
+let rendering    = false;   // true while an async get_pixels call is in flight
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Canvas sizing
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -135,14 +143,6 @@ function resizeCanvas(): void {
 
 window.addEventListener('resize', () => { resizeCanvas(); });
 resizeCanvas();
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Render loop
-// ─────────────────────────────────────────────────────────────────────────────
-
-let sceneLoaded  = false;
-let cameraDirty  = false;
-let rendering    = false;   // true while an async get_pixels call is in flight
 
 /**
  * Dispatch a render, read pixels back from the GPU, and blit to the canvas.
