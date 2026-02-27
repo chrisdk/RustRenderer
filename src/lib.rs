@@ -16,6 +16,7 @@
 use wasm_bindgen::prelude::*;
 
 pub mod accel;
+pub mod camera;
 pub mod scene;
 
 #[wasm_bindgen]
