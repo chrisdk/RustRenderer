@@ -14,6 +14,7 @@ import init, {
     update_camera,
     render,
     get_pixels,
+    get_scene_bounds,
 } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
 
@@ -69,6 +70,46 @@ function addScaled(out: Vec3, v: Vec3, s: number): void {
     out[0] += v[0] * s;
     out[1] += v[1] * s;
     out[2] += v[2] * s;
+}
+
+/**
+ * Position the camera so the loaded scene fills roughly 80% of the viewport
+ * in whichever axis (horizontal or vertical) it's largest in screen space.
+ *
+ * The camera is placed along +Z looking toward the scene centre, at a distance
+ * computed from the bounding box half-extents and the current vFOV/aspect:
+ *
+ *   dist = max(
+ *     hy / (0.8 * tan(vfov/2)),          // fill 80% vertically
+ *     hx / (0.8 * tan(vfov/2) * aspect), // fill 80% horizontally
+ *     hz * 1.1,                          // stay outside the model's depth
+ *   )
+ *
+ * Falls back silently if no scene bounds are available yet.
+ */
+function applyAutoCamera(): void {
+    const b = get_scene_bounds();
+    if (b.length < 6) return;
+
+    const cx = (b[0] + b[3]) / 2;
+    const cy = (b[1] + b[4]) / 2;
+    const cz = (b[2] + b[5]) / 2;
+    const hx = (b[3] - b[0]) / 2;
+    const hy = (b[4] - b[1]) / 2;
+    const hz = (b[5] - b[2]) / 2;
+
+    const aspect = canvas.width > 0 && canvas.height > 0
+        ? canvas.width / canvas.height
+        : 16 / 9;
+    const halfTanVFov = Math.tan(VFOV / 2);
+
+    const dByHeight = hy / (0.8 * halfTanVFov);
+    const dByWidth  = hx / (0.8 * halfTanVFov * aspect);
+    const dist = Math.max(dByHeight, dByWidth, hz * 1.1, 0.1);
+
+    camera.position = [cx, cy, cz + dist];
+    camera.yaw      = 0;
+    camera.pitch    = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,12 +265,14 @@ async function loadSceneBytes(
     setStatus('Loading scene…');
     try {
         load_scene(bytes);
-        // Apply the scene's recommended camera position, or leave the current
-        // camera where it is if no preset was supplied (e.g. drag-and-drop).
+        // Use the explicit preset (e.g. Cornell Box needs an interior viewpoint),
+        // otherwise auto-frame from the scene's bounding box.
         if (cameraPreset) {
             camera.position = [...cameraPreset.position];
             camera.yaw      = cameraPreset.yaw;
             camera.pitch    = cameraPreset.pitch;
+        } else {
+            applyAutoCamera();
         }
         sceneLoaded  = true;
         cameraDirty  = true;

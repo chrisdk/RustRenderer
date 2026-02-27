@@ -31,11 +31,16 @@ interface GltfMaterial {
     emissive?:  [number, number, number];
 }
 
-/** A named scene paired with a recommended starting camera. */
+/** A named scene paired with an optional recommended starting camera. */
 export interface BuiltinScene {
     readonly name:  string;
     readonly label: string;
-    readonly camera: {
+    /**
+     * Explicit camera preset for scenes that need a specific viewpoint (e.g.
+     * inside a Cornell Box). When absent the frontend auto-frames the scene
+     * from its bounding box so the model fills ~80% of the viewport.
+     */
+    readonly camera?: {
         position: [number, number, number];
         yaw:      number;
         pitch:    number;
@@ -480,9 +485,7 @@ export const BUILTIN_SCENES: readonly BuiltinScene[] = [
     {
         name:  'water-bottle',
         label: 'Water Bottle',
-        // The model is a ~16 cm tall aluminium bottle in GLTF metre-units.
-        // Camera sits ~40 cm back, slightly above centre.
-        camera: { position: [0, 0.08, 0.4], yaw: 0, pitch: -0.1 },
+        // No camera preset — the frontend auto-frames from the bounding box.
         build: () => fetchGlb(
             'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets' +
             '/main/Models/WaterBottle/glTF-Binary/WaterBottle.glb',
@@ -491,9 +494,7 @@ export const BUILTIN_SCENES: readonly BuiltinScene[] = [
     {
         name:  'lantern',
         label: 'Lantern',
-        // A hanging outdoor lantern roughly 0.5 m tall.
-        // Camera is a couple of metres back to take in the whole model.
-        camera: { position: [0, 0.3, 2.0], yaw: 0, pitch: 0 },
+        // No camera preset — the frontend auto-frames from the bounding box.
         build: () => fetchGlb(
             'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets' +
             '/main/Models/Lantern/glTF-Binary/Lantern.glb',

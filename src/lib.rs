@@ -40,6 +40,10 @@ pub mod scene;
 struct AppState {
     renderer: renderer::Renderer,
     camera:   camera::Camera,
+    /// World-space AABB of the currently loaded scene (min corner, max corner).
+    /// Set by `load_scene`; used by `get_scene_bounds` so the frontend can
+    /// auto-position the camera without needing a separate bounding-box pass.
+    scene_bounds: Option<([f32; 3], [f32; 3])>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -81,7 +85,7 @@ pub async fn init_renderer() -> Result<(), JsValue> {
         16.0 / 9.0,
     );
 
-    STATE.with(|s| *s.borrow_mut() = Some(AppState { renderer, camera }));
+    STATE.with(|s| *s.borrow_mut() = Some(AppState { renderer, camera, scene_bounds: None }));
 
     log::info!("renderer ready");
     Ok(())
@@ -109,9 +113,37 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
             .as_mut()
             .ok_or_else(|| JsValue::from_str("call init_renderer() first"))?;
 
+        // Capture the world-space AABB from the BVH root before upload consumes it.
+        // The root node (index 0) always covers the entire scene.
+        let bounds = bvh.nodes.first()
+            .map(|root| (root.aabb_min, root.aabb_max));
+
         state.renderer.upload_scene(&bvh, &scene.materials, &scene.textures);
+        state.scene_bounds = bounds;
         log::info!("scene loaded");
         Ok(())
+    })
+}
+
+/// Returns the world-space axis-aligned bounding box of the loaded scene as a
+/// `Float32Array` of six values: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
+///
+/// Returns an empty array if no scene has been loaded yet. The frontend uses
+/// this to auto-position the camera so the model fills the viewport sensibly.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn get_scene_bounds() -> js_sys::Float32Array {
+    STATE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .and_then(|state| state.scene_bounds)
+            .map(|(mn, mx)| {
+                let arr = js_sys::Float32Array::new_with_length(6);
+                arr.set_index(0, mn[0]); arr.set_index(1, mn[1]); arr.set_index(2, mn[2]);
+                arr.set_index(3, mx[0]); arr.set_index(4, mx[1]); arr.set_index(5, mx[2]);
+                arr
+            })
+            .unwrap_or_else(|| js_sys::Float32Array::new_with_length(0))
     })
 }
 
