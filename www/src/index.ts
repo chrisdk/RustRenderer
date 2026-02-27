@@ -308,7 +308,13 @@ async function main(): Promise<void> {
     // 1. Load the WASM binary.
     await init();
 
-    // 2. Acquire the WebGPU device (async — goes through the browser's GPU API).
+    // 2. Populate the scene picker. The buttons only generate GLB bytes and
+    //    call load_scene() — they don't need a GPU device to be rendered into
+    //    the DOM. Doing this before init_renderer() means the picker is always
+    //    visible even if the GPU request fails.
+    buildScenePicker();
+
+    // 3. Acquire the WebGPU device (async — goes through the browser's GPU API).
     setStatus('Requesting GPU…');
     try {
         await init_renderer();
@@ -318,9 +324,6 @@ async function main(): Promise<void> {
     }
 
     setStatus('Choose a scene below, or drop a GLTF / GLB file');
-
-    // 3. Populate the scene picker now that the WASM module is ready.
-    buildScenePicker();
 
     // 4. Start the animation loop.
     tick();
