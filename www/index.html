@@ -2,14 +2,126 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>3D Renderer</title>
+    <title>Path Tracer</title>
     <style>
-        body { margin: 0; background: #000; }
-        canvas { display: block; }
+        *, *::before, *::after { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            background: #000;
+            overflow: hidden;
+            font-family: system-ui, sans-serif;
+            color: #fff;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: crosshair;
+        }
+
+        /* Floating UI sits on top of the canvas */
+        #ui {
+            position: fixed;
+            inset: 0;
+            pointer-events: none; /* let clicks reach the canvas by default */
+        }
+
+        /* ── Status panel (top-left) ───────────────────────────────────────── */
+        #status-panel {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: auto;
+        }
+
+        #status {
+            background: rgba(0,0,0,0.6);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            backdrop-filter: blur(4px);
+        }
+
+        #load-btn {
+            align-self: flex-start;
+            background: rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 13px;
+            padding: 6px 14px;
+            backdrop-filter: blur(4px);
+            transition: background 0.15s;
+        }
+        #load-btn:hover { background: rgba(255,255,255,0.22); }
+
+        /* hidden file input wired to the button */
+        #file-input { display: none; }
+
+        /* ── Controls hint (bottom-center) ────────────────────────────────── */
+        #hints {
+            position: absolute;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.55);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 6px;
+            padding: 6px 16px;
+            font-size: 12px;
+            color: rgba(255,255,255,0.7);
+            white-space: nowrap;
+            backdrop-filter: blur(4px);
+            transition: opacity 0.5s;
+        }
+        #hints.fade { opacity: 0; }
+
+        /* ── Drag-and-drop overlay ─────────────────────────────────────────── */
+        #drop-overlay {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.55);
+            font-size: 22px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            border: 3px dashed rgba(255,255,255,0.4);
+            border-radius: 12px;
+            margin: 24px;
+        }
+        #drop-overlay.active { display: flex; }
     </style>
 </head>
 <body>
     <canvas id="canvas"></canvas>
+
+    <div id="ui">
+        <div id="status-panel">
+            <div id="status">Initializing WebGPU…</div>
+            <button id="load-btn">Load scene</button>
+            <input id="file-input" type="file" accept=".gltf,.glb">
+        </div>
+
+        <div id="hints">
+            Click canvas to look around &nbsp;·&nbsp;
+            WASD to move &nbsp;·&nbsp;
+            Space / Shift to fly up / down &nbsp;·&nbsp;
+            Esc to release mouse
+        </div>
+
+        <div id="drop-overlay">Drop GLTF / GLB here</div>
+    </div>
+
     <script type="module" src="dist/index.js"></script>
 </body>
 </html>
