@@ -1,11 +1,13 @@
 /**
  * Built-in demo scenes, procedurally generated as GLB files.
  *
- * All geometry here is hand-authored and in the public domain. The Cornell
- * Box material values follow the reference measurement data published by
- * Cornell University's Program of Computer Graphics (freely available at
- * https://www.graphics.cornell.edu/online/box/data.html). No third-party
- * assets are used; no attribution is required.
+ * All geometry here is hand-authored and in the public domain.
+ *
+ * Cornell Box geometry and material values follow the reference measurements
+ * published by Cornell University's Program of Computer Graphics (available at
+ * https://www.graphics.cornell.edu/online/box/data.html).
+ *
+ * No third-party assets are used; no attribution is required.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,7 +70,7 @@ function faceNormal(v0: Pt, v1: Pt, v2: Pt): Pt {
  * Two CCW triangles forming a quad: (v0,v1,v2) + (v0,v2,v3).
  * Vertices must be wound counter-clockwise when viewed from the front face.
  * The face normal is computed from the first triangle and applied to all
- * six vertices (flat shading — our shader recomputes normals anyway).
+ * six vertices (flat shading).
  */
 function quad(v0: Pt, v1: Pt, v2: Pt, v3: Pt, matIdx: number): Part {
     const n = faceNormal(v0, v1, v2);
@@ -80,7 +82,7 @@ function quad(v0: Pt, v1: Pt, v2: Pt, v3: Pt, matIdx: number): Part {
 }
 
 /**
- * Five visible faces of an axis-aligned box (top, four sides; no bottom).
+ * Five visible faces of an axis-aligned box (top + four sides; no bottom).
  * cx/cy/cz: centre. ex/ey/ez: half-extents.
  */
 function box(
@@ -98,6 +100,64 @@ function box(
         quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], matIdx), // +X
         quad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], matIdx), // +Y (top)
     ];
+}
+
+/**
+ * UV sphere centred at (cx, cy, cz) with the given radius.
+ *
+ * Uses per-vertex outward normals rather than flat face normals, so the
+ * geometry is ready for smooth shading when the renderer supports it.
+ *
+ * `stacks` = latitude bands (rings from pole to pole).
+ * `slices` = longitude segments (slices around the equator).
+ * More of each → rounder sphere, more triangles. 20×32 is a good default.
+ *
+ * Winding verification (outward-normal CCW rule):
+ *   For any quad on the sphere surface, viewing from outside, vertices go
+ *   v00 → v01 → v11 → v10 (bottom-left, top-left, top-right, bottom-right in
+ *   angular space), which produces normals pointing away from the centre.
+ */
+function uvSphere(
+    cx: number, cy: number, cz: number, r: number,
+    stacks: number, slices: number,
+    matIdx: number,
+): Part {
+    const positions: number[] = [];
+    const normals:   number[] = [];
+
+    for (let i = 0; i < stacks; i++) {
+        const phi0 = Math.PI * i / stacks       - Math.PI / 2;
+        const phi1 = Math.PI * (i + 1) / stacks - Math.PI / 2;
+
+        for (let j = 0; j < slices; j++) {
+            const theta0 = 2 * Math.PI * j       / slices;
+            const theta1 = 2 * Math.PI * (j + 1) / slices;
+
+            // Outward unit normal at a (phi, theta) point on the unit sphere.
+            // X = east, Y = up, Z = south (matches our world coordinate system).
+            const nrm = (phi: number, theta: number): Pt => [
+                Math.cos(phi) * Math.cos(theta),
+                Math.sin(phi),
+                Math.cos(phi) * Math.sin(theta),
+            ];
+
+            // Four corners of this lat/lon quad.
+            const n00 = nrm(phi0, theta0);
+            const n10 = nrm(phi0, theta1);
+            const n11 = nrm(phi1, theta1);
+            const n01 = nrm(phi1, theta0);
+
+            const vtx = (n: Pt): Pt => [cx + r * n[0], cy + r * n[1], cz + r * n[2]];
+            const v00 = vtx(n00), v10 = vtx(n10), v11 = vtx(n11), v01 = vtx(n01);
+
+            // Two CCW triangles: (v00, v01, v11) + (v00, v11, v10).
+            // Produces outward-pointing face normals (verified analytically).
+            positions.push(...v00, ...v01, ...v11,  ...v00, ...v11, ...v10);
+            normals.push(  ...n00, ...n01, ...n11,  ...n00, ...n11, ...n10);
+        }
+    }
+
+    return { positions, normals, matIdx };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,7 +186,6 @@ function minMax3(floats: number[]): { min: number[]; max: number[] } {
  * POSITION + NORMAL accessors and material.
  */
 function buildGlb(parts: Part[], materials: GltfMaterial[]): ArrayBuffer {
-    // Flatten all positions and normals.
     const allPos  = parts.flatMap(p => p.positions);
     const allNorm = parts.flatMap(p => p.normals);
 
@@ -137,7 +196,6 @@ function buildGlb(parts: Part[], materials: GltfMaterial[]): ArrayBuffer {
     binData.set(allPos,  0);
     binData.set(allNorm, allPos.length);
 
-    // Build per-part accessors (two per part: POSITION then NORMAL).
     const accessors: object[] = [];
     let posOff  = 0;
     let normOff = 0;
@@ -160,7 +218,7 @@ function buildGlb(parts: Part[], materials: GltfMaterial[]): ArrayBuffer {
         primitives: [{
             attributes: { POSITION: i * 2, NORMAL: i * 2 + 1 },
             material: p.matIdx,
-            mode: 4,  // TRIANGLES
+            mode: 4,
         }],
     }));
 
@@ -208,23 +266,19 @@ function packGlb(json: object, binData: Float32Array): ArrayBuffer {
     const u8   = new Uint8Array(buf);
     let   off  = 0;
 
-    // File header
-    dv.setUint32(off, 0x46546C67, true); off += 4;  // 'glTF'
-    dv.setUint32(off, 2,          true); off += 4;  // version 2
+    dv.setUint32(off, 0x46546C67, true); off += 4;
+    dv.setUint32(off, 2,          true); off += 4;
     dv.setUint32(off, total,      true); off += 4;
 
-    // JSON chunk — pad with ASCII spaces (required by the GLB spec)
     dv.setUint32(off, jsonLen,     true); off += 4;
-    dv.setUint32(off, 0x4E4F534A, true); off += 4;  // 'JSON'
+    dv.setUint32(off, 0x4E4F534A, true); off += 4;
     u8.set(new TextEncoder().encode(jsonStr), off);
     u8.fill(0x20, off + jsonStr.length, off + jsonLen);
     off += jsonLen;
 
-    // Binary chunk — pad with zeros (required by the GLB spec)
     dv.setUint32(off, binLen,      true); off += 4;
-    dv.setUint32(off, 0x004E4942, true); off += 4;  // 'BIN\0'
+    dv.setUint32(off, 0x004E4942, true); off += 4;
     u8.set(new Uint8Array(binData.buffer), off);
-    // trailing zeros already present from ArrayBuffer zero-initialisation
 
     return buf;
 }
@@ -234,58 +288,138 @@ function packGlb(json: object, binData: Float32Array): ArrayBuffer {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * The Cornell Box — the canonical path-tracing test scene since 1984.
+ * The Cornell Box — the canonical path-tracing reference scene since 1984.
  *
  * A closed room with a white floor, ceiling, and back wall; a red left wall;
- * a green right wall; and a small warm-light panel just below the ceiling.
- * Material values approximate the physical measurements from Cornell's
- * original radiosity paper (Goral et al., SIGGRAPH 1984).
+ * a green right wall; and a warm area light just below the ceiling. Two
+ * white blocks occupy the lower half of the room, as in the original paper
+ * by Goral et al. (SIGGRAPH 1984).
+ *
+ * Material values approximate the physical spectral measurements from:
+ *   https://www.graphics.cornell.edu/online/box/data.html
+ *
+ * This scene is the acid test for any global illumination renderer: the
+ * characteristic red and green colour bleeding onto the white surfaces only
+ * appears with indirect illumination. It looks fine with direct lighting and
+ * spectacular once multi-bounce path tracing is in.
  */
 function cornellBox(): ArrayBuffer {
     const materials: GltfMaterial[] = [
-        { baseColor: [0.73, 0.73, 0.73, 1] },                       // 0: white
-        { baseColor: [0.65, 0.05, 0.05, 1] },                       // 1: red
-        { baseColor: [0.12, 0.45, 0.15, 1] },                       // 2: green
-        { baseColor: [1.00, 0.90, 0.70, 1], emissive: [1, 0.9, 0.7] }, // 3: warm light
+        { baseColor: [0.73, 0.73, 0.73, 1] },                            // 0: white
+        { baseColor: [0.65, 0.05, 0.05, 1] },                            // 1: red
+        { baseColor: [0.12, 0.45, 0.15, 1] },                            // 2: green
+        { baseColor: [1.00, 0.90, 0.70, 1], emissive: [1, 0.9, 0.7] },  // 3: warm area light
     ];
 
-    // Each quad uses CCW winding so its computed face normal points inward
-    // (toward the interior of the box, where the rays will hit from).
+    // Room walls — CCW winding so face normals point inward (toward the rays).
     const parts: Part[] = [
-        quad([-1,-1, 1], [ 1,-1, 1], [ 1,-1,-1], [-1,-1,-1], 0),  // floor   (+Y)
-        quad([-1, 1,-1], [ 1, 1,-1], [ 1, 1, 1], [-1, 1, 1], 0),  // ceiling (−Y)
-        quad([-1,-1,-1], [ 1,-1,-1], [ 1, 1,-1], [-1, 1,-1], 0),  // back    (+Z)
-        quad([-1,-1,-1], [-1, 1,-1], [-1, 1, 1], [-1,-1, 1], 1),  // left    (+X) red
-        quad([ 1,-1, 1], [ 1, 1, 1], [ 1, 1,-1], [ 1,-1,-1], 2),  // right   (−X) green
-        // Light panel slightly below y=+1 so the ceiling quad doesn't z-fight it.
+        quad([-1,-1, 1], [ 1,-1, 1], [ 1,-1,-1], [-1,-1,-1], 0),  // floor
+        quad([-1, 1,-1], [ 1, 1,-1], [ 1, 1, 1], [-1, 1, 1], 0),  // ceiling
+        quad([-1,-1,-1], [ 1,-1,-1], [ 1, 1,-1], [-1, 1,-1], 0),  // back wall
+        quad([-1,-1,-1], [-1, 1,-1], [-1, 1, 1], [-1,-1, 1], 1),  // left wall  (red)
+        quad([ 1,-1, 1], [ 1, 1, 1], [ 1, 1,-1], [ 1,-1,-1], 2),  // right wall (green)
+
+        // Area light: a panel flush with the ceiling, emitting downward.
         quad([-0.40, 0.998,-0.40], [ 0.40, 0.998,-0.40],
-             [ 0.40, 0.998, 0.40], [-0.40, 0.998, 0.40], 3),       // light   (−Y)
+             [ 0.40, 0.998, 0.40], [-0.40, 0.998, 0.40], 3),
+
+        // The two classic blocks from the original paper. Approximated at
+        // their canonical proportions: a tall thin block on the left and a
+        // shorter wider block on the right.
+        ...box(-0.35, -0.40, -0.20, 0.27, 0.60, 0.27, 0),  // tall block (left)
+        ...box( 0.35, -0.70,  0.25, 0.27, 0.30, 0.27, 0),  // short block (right)
     ];
 
     return buildGlb(parts, materials);
 }
 
 /**
- * Three coloured boxes on a stone ground plane.
+ * Cornell Spheres — the same room with two spheres instead of blocks.
  *
- * A quick sanity check for the renderer under open-sky conditions: tests
- * material colours, the directional light, and multiple objects casting
- * (well, not yet casting — that's Phase 4) shadows on each other.
+ * A classic variant of the Cornell Box that gives the path tracer more
+ * interesting geometry to work with. The large white sphere on the left and
+ * the smaller gold sphere on the right produce very different shading under
+ * indirect illumination: the white sphere picks up red and green colour
+ * bleeding from the walls; the gold sphere adds warm reflective highlights
+ * once the PBR shader is in.
+ *
+ * Camera position and room dimensions are identical to the standard Cornell
+ * Box so the two can be compared directly.
  */
-function openScene(): ArrayBuffer {
+function cornellSpheres(): ArrayBuffer {
     const materials: GltfMaterial[] = [
-        { baseColor: [0.42, 0.40, 0.35, 1] },  // 0: stone ground
-        { baseColor: [0.80, 0.18, 0.15, 1] },  // 1: red
-        { baseColor: [0.15, 0.30, 0.80, 1] },  // 2: blue
-        { baseColor: [0.85, 0.68, 0.10, 1] },  // 3: gold
+        { baseColor: [0.73, 0.73, 0.73, 1] },                            // 0: white
+        { baseColor: [0.65, 0.05, 0.05, 1] },                            // 1: red
+        { baseColor: [0.12, 0.45, 0.15, 1] },                            // 2: green
+        { baseColor: [1.00, 0.90, 0.70, 1], emissive: [1, 0.9, 0.7] },  // 3: warm area light
+        { baseColor: [0.73, 0.73, 0.73, 1], roughness: 0.0 },            // 4: mirror sphere
+        { baseColor: [0.83, 0.60, 0.10, 1], roughness: 0.1, metallic: 1.0 }, // 5: gold sphere
     ];
 
-    // Box helper: cy is the CENTRE y, so cy=ey places the bottom face at y=0.
     const parts: Part[] = [
-        quad([-10, 0, 10], [10, 0, 10], [10, 0, -10], [-10, 0, -10], 0), // ground
-        ...box(-2.5, 0.60, -3.5, 0.60, 0.60, 0.60, 1),  // red    cube
-        ...box( 0.0, 1.00, -4.5, 0.50, 1.00, 0.50, 2),  // blue   tower
-        ...box( 2.5, 0.45, -3.5, 0.80, 0.45, 0.80, 3),  // gold   slab
+        // Room
+        quad([-1,-1, 1], [ 1,-1, 1], [ 1,-1,-1], [-1,-1,-1], 0),  // floor
+        quad([-1, 1,-1], [ 1, 1,-1], [ 1, 1, 1], [-1, 1, 1], 0),  // ceiling
+        quad([-1,-1,-1], [ 1,-1,-1], [ 1, 1,-1], [-1, 1,-1], 0),  // back wall
+        quad([-1,-1,-1], [-1, 1,-1], [-1, 1, 1], [-1,-1, 1], 1),  // left wall  (red)
+        quad([ 1,-1, 1], [ 1, 1, 1], [ 1, 1,-1], [ 1,-1,-1], 2),  // right wall (green)
+        quad([-0.40, 0.998,-0.40], [ 0.40, 0.998,-0.40],
+             [ 0.40, 0.998, 0.40], [-0.40, 0.998, 0.40], 3),       // area light
+
+        // Spheres.
+        // 20×32 gives a smooth silhouette without excessive triangle count.
+        uvSphere(-0.38, -0.55, -0.10, 0.42, 20, 32, 4),  // large white sphere (left)
+        uvSphere( 0.37, -0.72,  0.25, 0.26, 20, 32, 5),  // small gold sphere  (right)
+    ];
+
+    return buildGlb(parts, materials);
+}
+
+/**
+ * Neon Grotto — a dark cave lit entirely by floating emissive orbs.
+ *
+ * Four glowing spheres — warm orange, electric blue, acid green, and pale
+ * gold — are the only light sources. Under the current single-bounce shader
+ * they look like luminous baubles in the dark. Under full path tracing each
+ * orb will cast soft coloured light onto the floor and walls, and the colours
+ * will mix where the spheres' illumination overlaps.
+ *
+ * The scene is deliberately dark and high-contrast so that the transition from
+ * direct-only to full global illumination is as dramatic as possible.
+ */
+function neonGrotto(): ArrayBuffer {
+    // Near-black walls; just enough albedo to show off the geometry.
+    const cave  = 0.025;
+    const materials: GltfMaterial[] = [
+        { baseColor: [cave, cave, cave * 1.2, 1] },  // 0: dark grey-blue cave walls
+        { baseColor: [1.0, 0.40, 0.05, 1], emissive: [1.0, 0.35, 0.02] },  // 1: orange orb
+        { baseColor: [0.1, 0.30, 1.00, 1], emissive: [0.0, 0.20, 1.00] },  // 2: blue orb
+        { baseColor: [0.1, 1.00, 0.20, 1], emissive: [0.0, 0.90, 0.10] },  // 3: green orb
+        { baseColor: [1.0, 0.95, 0.60, 1], emissive: [1.0, 0.85, 0.40] },  // 4: gold orb
+    ];
+
+    // A low-ceilinged rectangular cave: wider than it is tall.
+    // x ∈ [−2, 2], y ∈ [−1, 0.7], z ∈ [−2.5, 0.5]
+    const [x0, x1] = [-2.0, 2.0];
+    const [y0, y1] = [-1.0, 0.7];
+    const [z0, z1] = [-2.5, 0.5];
+
+    const parts: Part[] = [
+        // Cave walls — all six faces, inward-facing normals.
+        quad([x0,y0,z1], [x1,y0,z1], [x1,y1,z1], [x0,y1,z1], 0),  // front wall
+        quad([x1,y0,z0], [x0,y0,z0], [x0,y1,z0], [x1,y1,z0], 0),  // back wall
+        quad([x0,y0,z0], [x0,y0,z1], [x0,y1,z1], [x0,y1,z0], 0),  // left wall
+        quad([x1,y0,z1], [x1,y0,z0], [x1,y1,z0], [x1,y1,z1], 0),  // right wall
+        quad([x0,y0,z1], [x0,y0,z0], [x1,y0,z0], [x1,y0,z1], 0),  // floor (up-facing)
+        quad([x0,y1,z0], [x0,y1,z1], [x1,y1,z1], [x1,y1,z0], 0),  // ceiling (down-facing)
+
+        // Four emissive orbs at different depths and heights.
+        // They're staggered so each one is clearly distinct from the others
+        // and their coloured light pools don't fully overlap.
+        uvSphere(-1.0, -0.25, -1.8, 0.30, 20, 32, 1),  // orange — back left,  mid-height
+        uvSphere( 0.9, -0.55, -1.0, 0.25, 20, 32, 2),  // blue   — centre-right, low
+        uvSphere(-0.4,  0.10, -0.4, 0.22, 20, 32, 3),  // green  — near,         high
+        uvSphere( 1.2, -0.15, -2.0, 0.28, 20, 32, 4),  // gold   — back right,   mid
     ];
 
     return buildGlb(parts, materials);
@@ -297,17 +431,25 @@ function openScene(): ArrayBuffer {
 
 export const BUILTIN_SCENES: readonly BuiltinScene[] = [
     {
-        name:  'cornell-box',
-        label: 'Cornell Box',
+        name:   'cornell-box',
+        label:  'Cornell Box',
         // Camera sits just inside the open front face, centred vertically,
         // so the box fills the frame at 60° vfov.
         camera: { position: [0, 0, 0.75], yaw: 0, pitch: 0 },
         build:  cornellBox,
     },
     {
-        name:  'open-scene',
-        label: 'Open Scene',
-        camera: { position: [0, 1.5, 6], yaw: 0, pitch: -0.1 },
-        build:  openScene,
+        name:   'cornell-spheres',
+        label:  'Cornell Spheres',
+        camera: { position: [0, 0, 0.75], yaw: 0, pitch: 0 },
+        build:  cornellSpheres,
+    },
+    {
+        name:   'neon-grotto',
+        label:  'Neon Grotto',
+        // Positioned near the front opening, looking down-and-in so all four
+        // orbs are visible in the frame.
+        camera: { position: [0, 0.3, 1.2], yaw: 0, pitch: -0.18 },
+        build:  neonGrotto,
     },
 ];
