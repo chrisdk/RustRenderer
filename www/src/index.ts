@@ -322,7 +322,10 @@ function buildScenePicker(): void {
             activeBtn = btn;
             btn.classList.add('active');
 
-            const glb = scene.build();
+            // build() is synchronous for procedural scenes and returns a
+            // Promise for remote scenes that need a network fetch.
+            setStatus('Downloading scene…');
+            const glb = await Promise.resolve(scene.build());
             await loadSceneBytes(new Uint8Array(glb), scene.camera);
         });
 

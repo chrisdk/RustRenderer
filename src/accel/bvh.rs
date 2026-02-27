@@ -97,35 +97,59 @@ pub struct BvhNode {
 /// belonging to a leaf are stored contiguously. This avoids random memory
 /// access during traversal and is cache-friendly on the GPU.
 ///
-/// Each triangle stores both its world-space vertex **positions** (used for
-/// fast ray–triangle intersection) and the original vertex **indices** (used
-/// after intersection to interpolate normals, UVs, and tangents for shading).
+/// Everything the shader needs to shade a hit point is packed here:
+/// world-space positions for intersection, world-space normals for lighting,
+/// UV coordinates for texture sampling, and the material index.
 ///
-/// Padded to 64 bytes so WGSL is happy when this struct lives in a storage
-/// buffer array (WGSL requires array-element structs to be multiples of 16
-/// bytes). The `_pad` field is always zero and is ignored by the shader.
+/// Padded to 128 bytes, a multiple of 16 as required for WGSL storage-buffer
+/// array elements. The `_pad` field is always zero and ignored by the shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BvhTriangle {
+    // ── World-space vertex positions (for ray–triangle intersection) ──────────
+
     /// World-space position of the first vertex.
-    pub v0: [f32; 3],
+    pub v0: [f32; 3],   // offset  0
     /// World-space position of the second vertex.
-    pub v1: [f32; 3],
+    pub v1: [f32; 3],   // offset 12
     /// World-space position of the third vertex.
-    pub v2: [f32; 3],
+    pub v2: [f32; 3],   // offset 24
+
+    // ── Vertex indices and material ───────────────────────────────────────────
 
     /// Index of the first vertex in [`Scene::vertices`], for shading data.
-    pub i0: u32,
+    pub i0: u32,            // offset 36
     /// Index of the second vertex in [`Scene::vertices`], for shading data.
-    pub i1: u32,
+    pub i1: u32,            // offset 40
     /// Index of the third vertex in [`Scene::vertices`], for shading data.
-    pub i2: u32,
-
+    pub i2: u32,            // offset 44
     /// Index into [`Scene::materials`] for shading this triangle's surface.
-    pub material_index: u32,
+    pub material_index: u32, // offset 48
 
-    /// Padding to bring the struct to 64 bytes. Always zero; ignored by the GPU.
-    pub _pad: [u32; 3],
+    // ── World-space vertex normals (for smooth shading) ───────────────────────
+    //
+    // Baking these in at BVH build time (rather than looking them up via i0/i1/i2
+    // at shader time) lets us apply the correct world-space transform once on the
+    // CPU, keep the GPU shader simple, and avoid a separate vertex buffer binding.
+
+    /// World-space normal at vertex 0.
+    pub n0: [f32; 3],   // offset 52
+    /// World-space normal at vertex 1.
+    pub n1: [f32; 3],   // offset 64
+    /// World-space normal at vertex 2.
+    pub n2: [f32; 3],   // offset 76
+
+    // ── UV texture coordinates ────────────────────────────────────────────────
+
+    /// UV coordinates at vertex 0.
+    pub uv0: [f32; 2],  // offset 88
+    /// UV coordinates at vertex 1.
+    pub uv1: [f32; 2],  // offset 96
+    /// UV coordinates at vertex 2.
+    pub uv2: [f32; 2],  // offset 104
+
+    /// Padding to 128 bytes. Always zero; ignored by the GPU.
+    pub _pad: [u32; 4], // offset 112
 }
 
 /// The fully built BVH acceleration structure.
@@ -161,14 +185,12 @@ impl Bvh {
         let triangles = tris
             .into_iter()
             .map(|t| BvhTriangle {
-                v0: t.v0,
-                v1: t.v1,
-                v2: t.v2,
-                i0: t.i0,
-                i1: t.i1,
-                i2: t.i2,
+                v0: t.v0, v1: t.v1, v2: t.v2,
+                i0: t.i0, i1: t.i1, i2: t.i2,
                 material_index: t.material_index,
-                _pad: [0, 0, 0],
+                n0: t.n0, n1: t.n1, n2: t.n2,
+                uv0: t.uv0, uv1: t.uv1, uv2: t.uv2,
+                _pad: [0; 4],
             })
             .collect();
 
@@ -191,20 +213,20 @@ struct Aabb {
 /// Stored separately from `BvhTriangle` because the centroid is only needed
 /// during the build (for sorting) and not at traversal time.
 struct BuildTriangle {
-    v0:            [f32; 3],
-    v1:            [f32; 3],
-    v2:            [f32; 3],
+    v0:       [f32; 3],
+    v1:       [f32; 3],
+    v2:       [f32; 3],
     /// The average of the three vertex positions, used to decide which half of
     /// the split the triangle belongs to.
-    centroid:      [f32; 3],
-    i0:            u32,
-    i1:            u32,
-    i2:            u32,
+    centroid: [f32; 3],
+    i0: u32, i1: u32, i2: u32,
+    n0: [f32; 3], n1: [f32; 3], n2: [f32; 3],
+    uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2],
     material_index: u32,
 }
 
 /// Iterates all mesh instances in the scene and emits one `BuildTriangle` per
-/// triangle, with vertex positions transformed into world space.
+/// triangle, with vertex positions and normals transformed into world space.
 fn collect_triangles(scene: &Scene) -> Vec<BuildTriangle> {
     let mut result = Vec::new();
 
@@ -221,9 +243,22 @@ fn collect_triangles(scene: &Scene) -> Vec<BuildTriangle> {
             let i1 = scene.indices[tri_base + 1];
             let i2 = scene.indices[tri_base + 2];
 
-            let v0 = transform_point(xform, scene.vertices[i0 as usize].position);
-            let v1 = transform_point(xform, scene.vertices[i1 as usize].position);
-            let v2 = transform_point(xform, scene.vertices[i2 as usize].position);
+            let vert0 = &scene.vertices[i0 as usize];
+            let vert1 = &scene.vertices[i1 as usize];
+            let vert2 = &scene.vertices[i2 as usize];
+
+            let v0 = transform_point(xform, vert0.position);
+            let v1 = transform_point(xform, vert1.position);
+            let v2 = transform_point(xform, vert2.position);
+
+            // Transform normals with the upper-left 3×3 of the matrix and
+            // renormalise. This is exact for rotation/translation/uniform-scale
+            // transforms (which cover the vast majority of real scenes). For
+            // non-uniform scale the proper transform is the inverse transpose,
+            // but renormalising is a good-enough approximation.
+            let n0 = transform_normal(xform, vert0.normal);
+            let n1 = transform_normal(xform, vert1.normal);
+            let n2 = transform_normal(xform, vert2.normal);
 
             let centroid = [
                 (v0[0] + v1[0] + v2[0]) / 3.0,
@@ -234,6 +269,8 @@ fn collect_triangles(scene: &Scene) -> Vec<BuildTriangle> {
             result.push(BuildTriangle {
                 v0, v1, v2, centroid,
                 i0, i1, i2,
+                n0, n1, n2,
+                uv0: vert0.uv, uv1: vert1.uv, uv2: vert2.uv,
                 material_index: mesh.material_index,
             });
         }
@@ -338,6 +375,22 @@ fn transform_point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Transforms a surface normal by the upper-left 3×3 of a column-major 4×4
+/// matrix, then renormalises the result.
+///
+/// Normals are direction vectors, not positions, so the translation column is
+/// ignored. Strictly correct normal transformation requires the inverse
+/// transpose of the matrix (to preserve perpendicularity under non-uniform
+/// scale), but multiplying by the original 3×3 and renormalising is accurate
+/// for rotation, translation, and uniform scale — the common cases in practice.
+fn transform_normal(m: &[[f32; 4]; 4], n: [f32; 3]) -> [f32; 3] {
+    let x = m[0][0]*n[0] + m[1][0]*n[1] + m[2][0]*n[2];
+    let y = m[0][1]*n[0] + m[1][1]*n[1] + m[2][1]*n[2];
+    let z = m[0][2]*n[0] + m[1][2]*n[1] + m[2][2]*n[2];
+    let len = (x*x + y*y + z*z).sqrt();
+    if len > 1e-8 { [x/len, y/len, z/len] } else { n }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -424,15 +477,21 @@ mod tests {
     #[test]
     fn test_bvh_triangle_gpu_layout() {
         use std::mem::{offset_of, size_of};
-        assert_eq!(size_of::<BvhTriangle>(),               64);
-        assert_eq!(offset_of!(BvhTriangle, v0),             0);
-        assert_eq!(offset_of!(BvhTriangle, v1),            12);
-        assert_eq!(offset_of!(BvhTriangle, v2),            24);
-        assert_eq!(offset_of!(BvhTriangle, i0),            36);
-        assert_eq!(offset_of!(BvhTriangle, i1),            40);
-        assert_eq!(offset_of!(BvhTriangle, i2),            44);
-        assert_eq!(offset_of!(BvhTriangle, material_index),48);
-        assert_eq!(offset_of!(BvhTriangle, _pad),          52);
+        assert_eq!(size_of::<BvhTriangle>(),                   128);
+        assert_eq!(offset_of!(BvhTriangle, v0),                  0);
+        assert_eq!(offset_of!(BvhTriangle, v1),                 12);
+        assert_eq!(offset_of!(BvhTriangle, v2),                 24);
+        assert_eq!(offset_of!(BvhTriangle, i0),                 36);
+        assert_eq!(offset_of!(BvhTriangle, i1),                 40);
+        assert_eq!(offset_of!(BvhTriangle, i2),                 44);
+        assert_eq!(offset_of!(BvhTriangle, material_index),     48);
+        assert_eq!(offset_of!(BvhTriangle, n0),                 52);
+        assert_eq!(offset_of!(BvhTriangle, n1),                 64);
+        assert_eq!(offset_of!(BvhTriangle, n2),                 76);
+        assert_eq!(offset_of!(BvhTriangle, uv0),                88);
+        assert_eq!(offset_of!(BvhTriangle, uv1),                96);
+        assert_eq!(offset_of!(BvhTriangle, uv2),               104);
+        assert_eq!(offset_of!(BvhTriangle, _pad),              112);
         let _: &[u8] = bytemuck::bytes_of(&BvhTriangle::zeroed());
     }
 

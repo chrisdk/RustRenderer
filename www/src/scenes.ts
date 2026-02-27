@@ -40,7 +40,13 @@ export interface BuiltinScene {
         yaw:      number;
         pitch:    number;
     };
-    build(): ArrayBuffer;
+    /**
+     * Returns the GLB bytes for this scene.
+     * Procedural scenes return an ArrayBuffer synchronously.
+     * Remote scenes return a Promise<ArrayBuffer> that fetches the file.
+     * Call sites should always await Promise.resolve(scene.build()).
+     */
+    build(): ArrayBuffer | Promise<ArrayBuffer>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -426,6 +432,22 @@ function neonGrotto(): ArrayBuffer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Remote scene loader
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch a remote GLB file and return its bytes.
+ *
+ * We rely on the browser's HTTP cache for repeat visits — raw.githubusercontent.com
+ * sends sensible cache headers, so a re-click after the first download is fast.
+ */
+async function fetchGlb(url: string): Promise<ArrayBuffer> {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
+    return resp.arrayBuffer();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public exports
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -451,5 +473,30 @@ export const BUILTIN_SCENES: readonly BuiltinScene[] = [
         // orbs are visible in the frame.
         camera: { position: [0, 0.3, 1.2], yaw: 0, pitch: -0.18 },
         build:  neonGrotto,
+    },
+
+    // ── Khronos glTF Sample Assets ────────────────────────────────────────────
+    // CC0 (public domain). No attribution legally required, but thanks Khronos!
+    {
+        name:  'water-bottle',
+        label: 'Water Bottle',
+        // The model is a ~16 cm tall aluminium bottle in GLTF metre-units.
+        // Camera sits ~40 cm back, slightly above centre.
+        camera: { position: [0, 0.08, 0.4], yaw: 0, pitch: -0.1 },
+        build: () => fetchGlb(
+            'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets' +
+            '/main/Models/WaterBottle/glTF-Binary/WaterBottle.glb',
+        ),
+    },
+    {
+        name:  'lantern',
+        label: 'Lantern',
+        // A hanging outdoor lantern roughly 0.5 m tall.
+        // Camera is a couple of metres back to take in the whole model.
+        camera: { position: [0, 0.3, 2.0], yaw: 0, pitch: 0 },
+        build: () => fetchGlb(
+            'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets' +
+            '/main/Models/Lantern/glTF-Binary/Lantern.glb',
+        ),
     },
 ];

@@ -26,6 +26,8 @@
 //! | 0     | 0       | bvh_nodes    | storage | read               |
 //! | 0     | 1       | bvh_tris     | storage | read               |
 //! | 0     | 2       | materials    | storage | read               |
+//! | 0     | 3       | tex_data     | storage | read               |
+//! | 0     | 4       | tex_info     | storage | read               |
 //! | 1     | 0       | camera       | uniform | read               |
 //! | 1     | 1       | frame        | uniform | read               |
 //! | 1     | 2       | output       | storage | read_write         |
@@ -33,6 +35,7 @@
 use crate::accel::bvh::Bvh;
 use crate::camera::CameraUniform;
 use crate::scene::material::Material;
+use crate::scene::texture::Texture;
 
 // ============================================================================
 // Supporting types
@@ -52,6 +55,20 @@ pub struct FrameUniforms {
     pub _pad:         u32,
 }
 
+/// Per-texture metadata uploaded to the GPU alongside the flat pixel data.
+///
+/// The shader uses this to locate each texture's pixel data within the shared
+/// `tex_data` storage buffer and to convert UV coordinates to pixel addresses.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuTextureInfo {
+    /// Pixel index (not byte offset) into `tex_data` where this texture starts.
+    offset: u32,
+    width:  u32,
+    height: u32,
+    _pad:   u32,
+}
+
 // ============================================================================
 // Renderer
 // ============================================================================
@@ -67,6 +84,12 @@ pub struct Renderer {
     pub(crate) bvh_nodes_buf: Option<wgpu::Buffer>,
     pub(crate) bvh_tris_buf:  Option<wgpu::Buffer>,
     pub(crate) materials_buf: Option<wgpu::Buffer>,
+    /// Flat RGBA8 pixel data for all scene textures, packed as one u32 per
+    /// pixel (R in low bits, A in high bits). `tex_info_buf` maps a texture
+    /// index to an offset into this buffer.
+    pub(crate) tex_data_buf:  Option<wgpu::Buffer>,
+    /// Per-texture metadata: pixel offset into `tex_data_buf`, width, height.
+    pub(crate) tex_info_buf:  Option<wgpu::Buffer>,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
@@ -141,6 +164,8 @@ impl Renderer {
             bvh_nodes_buf: None,
             bvh_tris_buf:  None,
             materials_buf: None,
+            tex_data_buf:  None,
+            tex_info_buf:  None,
             camera_buf:    None,
             frame_buf:     None,
             output_buf:    None,
@@ -158,10 +183,10 @@ impl Renderer {
 // ============================================================================
 
 impl Renderer {
-    /// Uploads BVH geometry and materials into GPU storage buffers.
+    /// Uploads BVH geometry, materials, and textures into GPU storage buffers.
     ///
     /// Calling this a second time drops the old buffers and creates fresh ones.
-    pub fn upload_scene(&mut self, bvh: &Bvh, materials: &[Material]) {
+    pub fn upload_scene(&mut self, bvh: &Bvh, materials: &[Material], textures: &[Texture]) {
         use wgpu::util::DeviceExt;
         let flags = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
 
@@ -187,9 +212,49 @@ impl Renderer {
             },
         ));
 
+        // Pack all textures into a single flat storage buffer.
+        // Each pixel becomes one u32 with R in the low byte and A in the high
+        // byte, matching the order the WGSL shader unpacks them. A separate
+        // metadata buffer records where each texture starts in this flat array.
+        let mut tex_data: Vec<u32> = Vec::new();
+        let mut tex_info: Vec<GpuTextureInfo> = Vec::new();
+
+        for texture in textures {
+            let offset = tex_data.len() as u32;
+            // Pack RGBA8 bytes → u32: [R, G, B, A] → R | G<<8 | B<<16 | A<<24.
+            // Using an explicit loop avoids bytemuck alignment requirements on
+            // the source Vec<u8> (whose backing store may only be 1-byte aligned).
+            tex_data.extend(texture.data.chunks_exact(4).map(|c| {
+                (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
+            }));
+            tex_info.push(GpuTextureInfo {
+                offset, width: texture.width, height: texture.height, _pad: 0,
+            });
+        }
+
+        // WebGPU requires non-zero buffer sizes even when nothing uses them.
+        if tex_data.is_empty() { tex_data.push(0); }
+        if tex_info.is_empty() { tex_info.push(GpuTextureInfo { offset: 0, width: 0, height: 0, _pad: 0 }); }
+
+        self.tex_data_buf = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("tex_data"),
+                contents: bytemuck::cast_slice(&tex_data),
+                usage:    flags,
+            },
+        ));
+        self.tex_info_buf = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("tex_info"),
+                contents: bytemuck::cast_slice(&tex_info),
+                usage:    flags,
+            },
+        ));
+
         log::info!(
-            "scene uploaded: {} BVH nodes, {} triangles, {} materials",
+            "scene uploaded: {} BVH nodes, {} triangles, {} materials, {} textures ({} MB pixel data)",
             bvh.nodes.len(), bvh.triangles.len(), materials.len(),
+            textures.len(), tex_data.len() * 4 / 1_000_000,
         );
     }
 
@@ -236,7 +301,7 @@ impl Renderer {
         });
 
         // ── Bind group layouts ───────────────────────────────────────────────
-        // Group 0: scene data — three read-only storage buffers.
+        // Group 0: scene data — five read-only storage buffers.
         let scene_bgl = self.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 label: Some("scene_bgl"),
@@ -244,6 +309,8 @@ impl Renderer {
                     storage_ro(0), // bvh_nodes
                     storage_ro(1), // bvh_tris
                     storage_ro(2), // materials
+                    storage_ro(3), // tex_data  (flat RGBA8 pixel data)
+                    storage_ro(4), // tex_info  (per-texture offset/size)
                 ],
             }
         );
@@ -397,6 +464,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: self.bvh_nodes_buf.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.bvh_tris_buf.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: self.materials_buf.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.tex_data_buf.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.tex_info_buf.as_ref().unwrap().as_entire_binding() },
             ],
         });
 
@@ -471,7 +540,7 @@ impl Renderer {
 
         // Drive completion: poll on native, yield to the JS event loop on WASM.
         #[cfg(not(target_arch = "wasm32"))]
-        self.device.poll(wgpu::Maintain::wait());
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         #[cfg(target_arch = "wasm32")]
         {

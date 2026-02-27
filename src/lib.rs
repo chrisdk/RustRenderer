@@ -109,7 +109,7 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
             .as_mut()
             .ok_or_else(|| JsValue::from_str("call init_renderer() first"))?;
 
-        state.renderer.upload_scene(&bvh, &scene.materials);
+        state.renderer.upload_scene(&bvh, &scene.materials, &scene.textures);
         log::info!("scene loaded");
         Ok(())
     })

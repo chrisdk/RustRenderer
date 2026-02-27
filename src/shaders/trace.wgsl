@@ -19,6 +19,8 @@
 //   binding 0 : array<BvhNode>     — the flat BVH tree
 //   binding 1 : array<BvhTriangle> — world-space triangles in BVH leaf order
 //   binding 2 : array<Material>    — PBR materials indexed by triangle
+//   binding 3 : array<u32>         — flat RGBA8 pixel data for all textures
+//   binding 4 : array<TexInfo>     — per-texture offset, width, height
 // Group 1 — per-frame data (updated every dispatch)
 //   binding 0 : Camera uniform     — camera position + pre-scaled basis
 //   binding 1 : FrameUniforms      — output width, height, sample index
@@ -43,20 +45,35 @@ struct BvhNode {
     count:          u32,
 }
 
-// Matches accel::bvh::BvhTriangle (64 bytes).
-// Three back-to-back [f32; 3] arrays are packed at 12-byte stride in Rust.
-// WGSL vec3<f32> has 16-byte alignment, so consecutive vec3s would drift from
-// the Rust offsets. We flatten to individual f32 scalars to match exactly.
-//   offsets  0..35  : v0x/y/z, v1x/y/z, v2x/y/z (nine f32s, 4 bytes each)
-//   offsets 36..51  : i0, i1, i2, material_index (four u32s)
-//   offsets 52..63  : _p0, _p1, _p2              (padding)
+// Matches accel::bvh::BvhTriangle (128 bytes).
+//
+// The Rust struct uses [f32; 3] for positions, normals, and [f32; 2] for UVs.
+// WGSL vec3<f32> has 16-byte alignment, which would drift from the Rust offsets,
+// so every field is spelled out as individual f32/u32 scalars instead.
+//
+//   offsets   0..35  : v0/v1/v2 positions (nine f32s)
+//   offsets  36..51  : i0, i1, i2, material_index (four u32s)
+//   offsets  52..87  : n0/n1/n2 normals (nine f32s)
+//   offsets  88..111 : uv0/uv1/uv2 (six f32s)
+//   offsets 112..127 : padding (four u32s)
 struct BvhTriangle {
+    // World-space vertex positions (for intersection)
     v0x: f32, v0y: f32, v0z: f32,
     v1x: f32, v1y: f32, v1z: f32,
     v2x: f32, v2y: f32, v2z: f32,
+    // Vertex indices and material
     i0: u32, i1: u32, i2: u32,
     material_index: u32,
-    _p0: u32, _p1: u32, _p2: u32,
+    // World-space vertex normals (for smooth shading)
+    n0x: f32, n0y: f32, n0z: f32,
+    n1x: f32, n1y: f32, n1z: f32,
+    n2x: f32, n2y: f32, n2z: f32,
+    // UV texture coordinates
+    uv0u: f32, uv0v: f32,
+    uv1u: f32, uv1v: f32,
+    uv2u: f32, uv2v: f32,
+    // Padding to 128 bytes
+    _p0: u32, _p1: u32, _p2: u32, _p3: u32,
 }
 
 // Matches scene::material::Material (64 bytes).
@@ -75,6 +92,15 @@ struct Material {
     mr_tex:       i32,
     emissive_tex: i32,
     _p0: u32, _p1: u32, _p2: u32,
+}
+
+// Matches renderer::gpu::GpuTextureInfo (16 bytes).
+struct TexInfo {
+    /// Pixel index into tex_data where this texture's pixels start.
+    offset: u32,
+    width:  u32,
+    height: u32,
+    _pad:   u32,
 }
 
 // Matches camera::CameraUniform (64 bytes).
@@ -102,6 +128,8 @@ struct FrameUniforms {
 @group(0) @binding(0) var<storage, read>       bvh_nodes: array<BvhNode>;
 @group(0) @binding(1) var<storage, read>       bvh_tris:  array<BvhTriangle>;
 @group(0) @binding(2) var<storage, read>       materials: array<Material>;
+@group(0) @binding(3) var<storage, read>       tex_data:  array<u32>;   // RGBA8 packed pixels
+@group(0) @binding(4) var<storage, read>       tex_info:  array<TexInfo>;
 
 @group(1) @binding(0) var<uniform>             camera:  Camera;
 @group(1) @binding(1) var<uniform>             frame:   FrameUniforms;
@@ -140,6 +168,44 @@ fn pcg(v: u32) -> u32 {
 fn rand_f32(seed: ptr<function, u32>) -> f32 {
     *seed = pcg(*seed);
     return f32(*seed) / 4294967296.0;
+}
+
+// ============================================================================
+// Texture sampling
+// ============================================================================
+
+// Sample a texture by index using nearest-neighbour filtering with UV wrap.
+//
+// tex_idx < 0 means "no texture" — returns a white vec4 so the caller can
+// multiply it against the material's scalar factor without changing it.
+//
+// UV coordinates are wrapped (modulo 1.0) so values outside [0, 1] repeat
+// the texture rather than clamping to the edge, which is the GLTF default.
+fn sample_texture(tex_idx: i32, uv: vec2<f32>) -> vec4<f32> {
+    if tex_idx < 0 {
+        return vec4(1.0, 1.0, 1.0, 1.0);
+    }
+
+    let info = tex_info[u32(tex_idx)];
+
+    // fract(x) = x - floor(x), which wraps any value into [0, 1).
+    let uf = fract(uv.x);
+    let vf = fract(uv.y);
+
+    // Convert to integer pixel coordinates, clamped so we never read past the
+    // last row/column of a texture when uf/vf rounds up to exactly 1.0.
+    let px = min(u32(uf * f32(info.width)),  info.width  - 1u);
+    let py = min(u32(vf * f32(info.height)), info.height - 1u);
+
+    // RGBA8 pixels are packed as one u32: R in byte 0, A in byte 3.
+    let packed = tex_data[info.offset + py * info.width + px];
+
+    return vec4(
+        f32( packed        & 0xFFu) / 255.0,  // R
+        f32((packed >>  8u) & 0xFFu) / 255.0,  // G
+        f32((packed >> 16u) & 0xFFu) / 255.0,  // B
+        f32((packed >> 24u) & 0xFFu) / 255.0,  // A
+    );
 }
 
 // ============================================================================
@@ -339,17 +405,45 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let tri = bvh_tris[hit.tri_idx];
         let mat = materials[tri.material_index];
 
-        // Flat face normal from vertex positions.
-        let v0     = vec3(tri.v0x, tri.v0y, tri.v0z);
-        let v1     = vec3(tri.v1x, tri.v1y, tri.v1z);
-        let v2     = vec3(tri.v2x, tri.v2y, tri.v2z);
-        let normal = normalize(cross(v1 - v0, v2 - v0));
+        // ── Smooth normal ─────────────────────────────────────────────────────
+        //
+        // Interpolate the three pre-baked world-space vertex normals using the
+        // hit's barycentric coordinates (u, v from Möller–Trumbore).
+        //   w = weight for vertex 0 (= 1 − u − v)
+        //   u = weight for vertex 1
+        //   v = weight for vertex 2
+        // The result is a per-fragment normal that smoothly follows the surface
+        // curvature, removing the faceted look you'd get from a flat face normal.
+        let bary_w = 1.0 - hit.u - hit.v;
+        let n0 = vec3(tri.n0x, tri.n0y, tri.n0z);
+        let n1 = vec3(tri.n1x, tri.n1y, tri.n1z);
+        let n2 = vec3(tri.n2x, tri.n2y, tri.n2z);
+        let normal = normalize(bary_w * n0 + hit.u * n1 + hit.v * n2);
 
-        // Lambertian shading: ambient + diffuse from the fixed directional light.
-        let n_dot_l  = max(dot(normal, LIGHT_DIR), 0.0);
-        let albedo   = mat.albedo.rgb;
-        let emissive = vec3(mat.emissive_r, mat.emissive_g, mat.emissive_b);
+        // ── UV interpolation ──────────────────────────────────────────────────
+        let uv = bary_w * vec2(tri.uv0u, tri.uv0v)
+               + hit.u  * vec2(tri.uv1u, tri.uv1v)
+               + hit.v  * vec2(tri.uv2u, tri.uv2v);
 
+        // ── Albedo ────────────────────────────────────────────────────────────
+        //
+        // The GLTF spec says the effective albedo is the base-color factor
+        // multiplied component-wise by the base-color texture sample (if any).
+        // Where no texture is present, sample_texture() returns white (1,1,1,1)
+        // so the multiplication is a no-op.
+        var albedo = mat.albedo.rgb * sample_texture(mat.albedo_tex, uv).rgb;
+
+        // ── Emissive ──────────────────────────────────────────────────────────
+        var emissive = vec3(mat.emissive_r, mat.emissive_g, mat.emissive_b)
+                     * sample_texture(mat.emissive_tex, uv).rgb;
+
+        // ── Lambertian shading ────────────────────────────────────────────────
+        //
+        // A single directional light gives a quick approximation of direct
+        // illumination. Ambient term (0.05) prevents surfaces facing away from
+        // the light from going completely black — a crude stand-in for indirect
+        // illumination until multi-bounce path tracing is implemented.
+        let n_dot_l = max(dot(normal, LIGHT_DIR), 0.0);
         color = albedo * (0.05 + 0.95 * n_dot_l) + emissive;
     }
 
