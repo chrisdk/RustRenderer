@@ -63,7 +63,25 @@
             text-transform: uppercase;
             letter-spacing: 0.10em;
             color: rgba(255,255,255,0.30);
-            padding: 6px 2px 2px;
+            padding: 6px 2px 0;
+        }
+
+        #scene-picker-source {
+            padding: 1px 2px 4px;
+        }
+        #scene-picker-source a {
+            font-size: 10px;
+            color: rgba(255,255,255,0.22);
+            text-decoration: none;
+            transition: color 0.12s;
+        }
+        #scene-picker-source a:hover { color: rgba(255,255,255,0.55); }
+
+        .scene-attribution {
+            font-size: 10px;
+            color: rgba(255,255,255,0.28);
+            padding: 1px 4px 5px 10px;
+            font-style: italic;
         }
 
         .scene-btn {
@@ -239,6 +257,10 @@
 
         <div id="scene-picker">
             <div id="scene-picker-label">Scenes</div>
+            <div id="scene-picker-source">
+                <a href="https://github.com/KhronosGroup/glTF-Sample-Assets"
+                   target="_blank" rel="noopener">Khronos glTF Sample Assets ↗</a>
+            </div>
             <!-- buttons injected by index.ts -->
         </div>
 

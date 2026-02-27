@@ -1,10 +1,17 @@
 /**
- * Built-in demo scenes backed by remote CC0 GLB assets from the Khronos
- * glTF Sample Assets collection.
+ * Built-in demo scenes sourced from the Khronos glTF Sample Assets collection.
+ * https://github.com/KhronosGroup/glTF-Sample-Assets
  *
  * No assets are bundled — files are fetched from raw.githubusercontent.com on
  * first use and cached by the browser for repeat visits.
+ *
+ * Licensing:
+ *   Most models are CC0 (public domain). The Damaged Helmet is CC BY 4.0 and
+ *   requires attribution — see the `attribution` field on that entry.
  */
+
+const KHRONOS_BASE =
+    'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -24,6 +31,12 @@ export interface BuiltinScene {
         yaw:      number;
         pitch:    number;
     };
+    /**
+     * Attribution string required by the asset's licence.
+     * Present only on non-CC0 assets. The frontend displays this below the
+     * scene button so credit is always visible to the user.
+     */
+    readonly attribution?: string;
     /**
      * Returns the GLB bytes for this scene.
      * Remote scenes return a Promise<ArrayBuffer> that fetches the file.
@@ -48,26 +61,50 @@ async function fetchGlb(url: string): Promise<ArrayBuffer> {
     return resp.arrayBuffer();
 }
 
+/** Shorthand: build a fetchGlb call for a Khronos sample model. */
+function khronos(model: string): () => Promise<ArrayBuffer> {
+    return () => fetchGlb(`${KHRONOS_BASE}/${model}/glTF-Binary/${model}.glb`);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public exports
 // ─────────────────────────────────────────────────────────────────────────────
 
-// CC0 (public domain). No attribution legally required, but thanks Khronos!
 export const BUILTIN_SCENES: readonly BuiltinScene[] = [
+    // ── CC BY 4.0 ─────────────────────────────────────────────────────────────
+    {
+        name:        'damaged-helmet',
+        label:       'Damaged Helmet',
+        // CC BY 4.0 — attribution required.
+        // Original by ctxwing on Sketchfab; adapted for glTF by theblueturtle_.
+        attribution: '© ctxwing / theblueturtle_ · CC BY 4.0',
+        build:       khronos('DamagedHelmet'),
+    },
+
+    // ── CC0 (public domain) ───────────────────────────────────────────────────
     {
         name:  'water-bottle',
         label: 'Water Bottle',
-        build: () => fetchGlb(
-            'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets' +
-            '/main/Models/WaterBottle/glTF-Binary/WaterBottle.glb',
-        ),
+        build: khronos('WaterBottle'),
     },
     {
         name:  'lantern',
         label: 'Lantern',
-        build: () => fetchGlb(
-            'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets' +
-            '/main/Models/Lantern/glTF-Binary/Lantern.glb',
-        ),
+        build: khronos('Lantern'),
+    },
+    {
+        name:  'boom-box',
+        label: 'BoomBox',
+        build: khronos('BoomBox'),
+    },
+    {
+        name:  'antique-camera',
+        label: 'Antique Camera',
+        build: khronos('AntiqueCamera'),
+    },
+    {
+        name:  'toy-car',
+        label: 'Toy Car',
+        build: khronos('ToyCar'),
     },
 ];

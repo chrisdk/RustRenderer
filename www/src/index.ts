@@ -431,14 +431,20 @@ function buildScenePicker(): void {
             activeBtn = btn;
             btn.classList.add('active');
 
-            // build() is synchronous for procedural scenes and returns a
-            // Promise for remote scenes that need a network fetch.
             setStatus('Downloading scene…');
             const glb = await Promise.resolve(scene.build());
             await loadSceneBytes(new Uint8Array(glb), scene.camera);
         });
 
         scenePicker.appendChild(btn);
+
+        // Show required attribution below the button for non-CC0 assets.
+        if (scene.attribution) {
+            const attr = document.createElement('div');
+            attr.className   = 'scene-attribution';
+            attr.textContent = scene.attribution;
+            scenePicker.appendChild(attr);
+        }
     }
 }
 
