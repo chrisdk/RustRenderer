@@ -28,6 +28,7 @@ const fileInput    = document.getElementById('file-input')  as HTMLInputElement;
 const hintsEl      = document.getElementById('hints')!;
 const dropOverlay  = document.getElementById('drop-overlay')!;
 const scenePicker  = document.getElementById('scene-picker')!;
+const renderBtn    = document.getElementById('render-btn')  as HTMLButtonElement;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Camera state
@@ -95,6 +96,7 @@ document.addEventListener('mousemove', e => {
                     Math.min( MAX_PITCH,
                     camera.pitch - e.movementY * LOOK_SPEED));
     cameraDirty = true;
+    if (hqRendering) hqCancelled = true;  // camera moved — abort the HQ render
 });
 
 /**
@@ -123,6 +125,12 @@ function processMovement(): boolean {
 let sceneLoaded  = false;
 let cameraDirty  = false;
 let rendering    = false;   // true while an async get_pixels call is in flight
+
+// High-quality progressive render state.
+let hqRendering  = false;   // true while the multi-sample render loop is running
+let hqCancelled  = false;   // set to true to stop the loop after the current sample
+
+const HQ_SAMPLES = 256;     // samples per pixel for a full quality render
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Canvas sizing
@@ -164,7 +172,9 @@ async function renderFrame(): Promise<void> {
     );
 
     // Dispatch the compute shader (synchronous — just enqueues GPU work).
-    render(w, h);
+    // sample_index = 0 resets the accumulator, giving a clean single-sample
+    // preview on every camera update.
+    render(w, h, 0);
 
     // Read pixels back (async — waits for GPU completion).
     const pixels = await get_pixels(w, h);
@@ -183,11 +193,18 @@ async function renderFrame(): Promise<void> {
 /**
  * Main animation loop. Processes input and triggers a render whenever the
  * camera changes. Runs at the browser's display refresh rate.
+ *
+ * While a high-quality render is running, camera movement cancels it so the
+ * user can immediately navigate to a better angle without waiting.
  */
 function tick(): void {
-    if (processMovement()) cameraDirty = true;
+    if (processMovement()) {
+        cameraDirty = true;
+        if (hqRendering) hqCancelled = true;
+    }
 
-    if (cameraDirty && sceneLoaded && !rendering) {
+    // Skip preview renders while the HQ render is accumulating samples.
+    if (!hqRendering && cameraDirty && sceneLoaded && !rendering) {
         cameraDirty = false;
         renderFrame();  // intentionally not awaited
     }
@@ -215,12 +232,74 @@ async function loadSceneBytes(
         }
         sceneLoaded  = true;
         cameraDirty  = true;
+        renderBtn.disabled = false;
         setStatus('Scene loaded — click to look around');
         fadeHints();
     } catch (err) {
         setStatus(`Error: ${err}`);
     }
 }
+
+// ── High-quality render ───────────────────────────────────────────────────────
+
+/**
+ * Progressively accumulate HQ_SAMPLES samples into the same image.
+ *
+ * Each iteration dispatches one sample and reads the result back to the
+ * canvas, so the image visibly sharpens in real time. The loop runs until
+ * it has accumulated HQ_SAMPLES samples, the user clicks Cancel, or the
+ * camera moves.
+ */
+async function startHighQualityRender(): Promise<void> {
+    if (!sceneLoaded || hqRendering) return;
+
+    // Wait for any in-flight preview render to finish before taking over.
+    while (rendering) {
+        await new Promise<void>(r => setTimeout(r, 16));
+    }
+
+    hqRendering  = true;
+    hqCancelled  = false;
+    rendering    = true;   // block the preview render loop
+    renderBtn.textContent = 'Cancel';
+    renderBtn.classList.add('cancel');
+
+    const w = canvas.width;
+    const h = canvas.height;
+
+    // Lock in the current camera for the full render.
+    update_camera(
+        camera.position[0], camera.position[1], camera.position[2],
+        camera.yaw, camera.pitch, VFOV, w / h,
+    );
+
+    for (let i = 0; i < HQ_SAMPLES && !hqCancelled; i++) {
+        render(w, h, i);
+        const pixels  = await get_pixels(w, h);
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
+        setStatus(`Rendering… ${i + 1} / ${HQ_SAMPLES} spp`);
+    }
+
+    rendering   = false;
+    hqRendering = false;
+    renderBtn.textContent = 'Render';
+    renderBtn.classList.remove('cancel');
+
+    if (hqCancelled) {
+        setStatus('Render cancelled — click to look around');
+        cameraDirty = true;   // redraw preview at new camera position
+    } else {
+        setStatus(`Done — ${HQ_SAMPLES} spp`);
+    }
+}
+
+renderBtn.addEventListener('click', () => {
+    if (hqRendering) {
+        hqCancelled = true;
+    } else {
+        startHighQualityRender();
+    }
+});
 
 // ── Built-in scene picker ─────────────────────────────────────────────────────
 

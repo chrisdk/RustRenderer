@@ -149,14 +149,18 @@ pub fn update_camera(
 
 /// Dispatches the path-tracing compute shader for one sample pass.
 ///
-/// Writes RGBA8 pixels into an internal GPU buffer. Call [`get_pixels`]
-/// afterwards to read them back.
+/// `sample_index` identifies which sample this is in a progressive render:
+/// - Pass `0` to start a new render (resets the accumulator).
+/// - Pass `1, 2, 3, …` to accumulate additional samples into the same image.
+///
+/// The output buffer holds the running average after each dispatch, so calling
+/// `get_pixels` after any sample gives a valid (progressively improving) image.
 ///
 /// Requires both `init_renderer` and `load_scene` to have been called first.
 /// Calling before the scene is loaded is a no-op with a console warning.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn render(width: u32, height: u32) {
+pub fn render(width: u32, height: u32, sample_index: u32) {
     let ready = STATE.with(|s| {
         s.borrow()
             .as_ref()
@@ -170,7 +174,7 @@ pub fn render(width: u32, height: u32) {
 
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
-            state.renderer.render_frame(width, height);
+            state.renderer.render_frame(width, height, sample_index);
         }
     });
 }

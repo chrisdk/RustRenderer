@@ -82,6 +82,28 @@
         .scene-btn.active { background: rgba(255,255,255,0.28);
                             border-color: rgba(255,255,255,0.50); }
 
+        /* ── Render button ─────────────────────────────────────────────────── */
+        #render-btn {
+            align-self: flex-start;
+            background: rgba(80, 140, 255, 0.25);
+            border: 1px solid rgba(120, 170, 255, 0.50);
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 7px 16px;
+            backdrop-filter: blur(4px);
+            transition: background 0.15s;
+            width: 100%;
+            text-align: left;
+        }
+        #render-btn:hover    { background: rgba(80, 140, 255, 0.40); }
+        #render-btn:disabled { opacity: 0.35; cursor: default; }
+        #render-btn.cancel   { background: rgba(220, 80, 60, 0.30);
+                               border-color: rgba(255, 120, 100, 0.50); }
+        #render-btn.cancel:hover { background: rgba(220, 80, 60, 0.45); }
+
         #load-btn {
             align-self: flex-start;
             background: rgba(255,255,255,0.06);
@@ -146,6 +168,7 @@
                 <div id="scene-picker-label">Built-in scenes</div>
                 <!-- Buttons injected here by index.ts -->
             </div>
+            <button id="render-btn" disabled>Render</button>
             <label id="load-btn" for="file-input">Load file…</label>
             <input id="file-input" type="file" accept=".gltf,.glb">
         </div>

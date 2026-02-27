@@ -1,9 +1,17 @@
-// Path-tracing compute shader — Phase 3: direct lighting, one bounce.
+// Path-tracing compute shader.
 //
-// One GPU thread per pixel. Shoots a primary ray, finds the closest triangle
-// via iterative BVH traversal, shades with a simple Lambertian BRDF and a
-// fixed directional sky light, then writes a packed RGBA8 value to the output
-// buffer.
+// One GPU thread per pixel. Shoots a jittered primary ray, finds the closest
+// triangle via iterative BVH traversal, shades with a Lambertian BRDF and a
+// fixed directional sky light, then accumulates the result into a float buffer.
+//
+// On each dispatch the sample_index field says which sample number this is.
+// When sample_index == 0 the accumulator is reset; otherwise the new sample is
+// added to the running sum and the average is written to the output buffer.
+// Calling the shader N times with sample_index 0..N-1 gives an N-sample
+// anti-aliased image.  The pixel jitter (a sub-pixel offset drawn from a
+// PCG hash of the pixel coords + sample_index) ensures every sample differs,
+// so the average converges to a smooth image rather than the same sharp-edged
+// frame repeated N times.
 //
 // Binding layout
 // ──────────────
@@ -11,10 +19,11 @@
 //   binding 0 : array<BvhNode>     — the flat BVH tree
 //   binding 1 : array<BvhTriangle> — world-space triangles in BVH leaf order
 //   binding 2 : array<Material>    — PBR materials indexed by triangle
-// Group 1 — per-frame data (updated every frame)
+// Group 1 — per-frame data (updated every dispatch)
 //   binding 0 : Camera uniform     — camera position + pre-scaled basis
 //   binding 1 : FrameUniforms      — output width, height, sample index
 //   binding 2 : array<u32>         — output RGBA8 pixels, row-major
+//   binding 3 : array<vec4<f32>>   — float accumulator, one vec4 per pixel
 
 // ============================================================================
 // Structs — byte layouts MUST match the corresponding Rust #[repr(C)] types.
@@ -82,7 +91,7 @@ struct Camera {
 struct FrameUniforms {
     width:        u32,
     height:       u32,
-    sample_index: u32,  // reserved for accumulation (Phase 4)
+    sample_index: u32,
     _pad:         u32,
 }
 
@@ -94,9 +103,10 @@ struct FrameUniforms {
 @group(0) @binding(1) var<storage, read>       bvh_tris:  array<BvhTriangle>;
 @group(0) @binding(2) var<storage, read>       materials: array<Material>;
 
-@group(1) @binding(0) var<uniform>             camera:    Camera;
-@group(1) @binding(1) var<uniform>             frame:     FrameUniforms;
-@group(1) @binding(2) var<storage, read_write> output:    array<u32>;
+@group(1) @binding(0) var<uniform>             camera:  Camera;
+@group(1) @binding(1) var<uniform>             frame:   FrameUniforms;
+@group(1) @binding(2) var<storage, read_write> output:  array<u32>;
+@group(1) @binding(3) var<storage, read_write> accum:   array<vec4<f32>>;
 
 // ============================================================================
 // Constants
@@ -111,6 +121,26 @@ const LIGHT_DIR: vec3<f32> = vec3<f32>(0.4082, 0.8165, 0.4082);
 
 const SKY_HORIZON: vec3<f32> = vec3<f32>(1.00, 1.00, 1.00);  // white horizon
 const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.49, 0.70, 1.00);  // sky blue
+
+// ============================================================================
+// PCG random number generator
+// ============================================================================
+
+// PCG-RXS-M-XS: a minimal but high-quality 32-bit hash. Much better than a
+// plain LCG for use as a noise source — produces no visible patterns.
+// Reference: O'Neill, "PCG: A Family of Simple Fast Space-Efficient
+// Statistically Good Algorithms for Random Number Generation", 2014.
+fn pcg(v: u32) -> u32 {
+    let state = v * 747796405u + 2891336453u;
+    let word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Advance the seed in place and return a float in [0, 1).
+fn rand_f32(seed: ptr<function, u32>) -> f32 {
+    *seed = pcg(*seed);
+    return f32(*seed) / 4294967296.0;
+}
 
 // ============================================================================
 // Ray–AABB intersection (slab method)
@@ -270,11 +300,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = frame.height;
     if gid.x >= w || gid.y >= h { return; }
 
-    // Pixel centre in [0, 1]. v = 0 is the top row (matches Camera::ray).
-    let u = (f32(gid.x) + 0.5) / f32(w);
-    let v = (f32(gid.y) + 0.5) / f32(h);
+    let px  = gid.x;
+    let py  = gid.y;
+    let idx = py * w + px;
 
-    // Generate primary ray, mirroring the Camera::ray() formula on the CPU.
+    // ── Per-sample RNG seed ───────────────────────────────────────────────────
+    //
+    // XOR three independent terms so neighbouring pixels and successive samples
+    // all start from unrelated seeds. The PCG step that follows scrambles even
+    // poor seeds into high-quality noise.
+    var seed = (px * 1973u) ^ (py * 9277u) ^ (frame.sample_index * 26699u + 1u);
+
+    // ── Jittered primary ray ──────────────────────────────────────────────────
+    //
+    // A uniform random offset within the pixel footprint turns the single-sample
+    // aliased result into a stochastic estimate of the true box-filter integral.
+    // Accumulate enough samples and the average converges to a sharp, clean image.
+    let jx = rand_f32(&seed) - 0.5;  // jitter in [-0.5, 0.5] pixels
+    let jy = rand_f32(&seed) - 0.5;
+
+    let u = (f32(px) + 0.5 + jx) / f32(w);
+    let v = (f32(py) + 0.5 + jy) / f32(h);
+
+    // Generate the primary ray, mirroring Camera::ray() on the CPU.
     let orig    = camera.position;
     let dir_raw = camera.fwd
                 + (2.0 * u - 1.0) * camera.rgt_scaled
@@ -291,8 +339,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let tri = bvh_tris[hit.tri_idx];
         let mat = materials[tri.material_index];
 
-        // Flat face normal from vertex positions. Phase 4 will interpolate
-        // smooth normals using the stored vertex indices (i0/i1/i2).
+        // Flat face normal from vertex positions.
         let v0     = vec3(tri.v0x, tri.v0y, tri.v0z);
         let v1     = vec3(tri.v1x, tri.v1y, tri.v1z);
         let v2     = vec3(tri.v2x, tri.v2y, tri.v2z);
@@ -306,5 +353,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         color = albedo * (0.05 + 0.95 * n_dot_l) + emissive;
     }
 
-    output[gid.y * w + gid.x] = pack_rgba8(color);
+    // ── Progressive accumulation ──────────────────────────────────────────────
+    //
+    // On sample 0 the accumulator is seeded with the first sample's value.
+    // On subsequent samples the new value is added to the running sum, and the
+    // output buffer gets the current average. This means the canvas updates after
+    // every sample, giving a live "image forming" feel during a long render.
+    let sample = vec4<f32>(color, 1.0);
+    var total: vec4<f32>;
+    if frame.sample_index == 0u {
+        total = sample;
+    } else {
+        total = accum[idx] + sample;
+    }
+    accum[idx] = total;
+
+    let avg = total.rgb / f32(frame.sample_index + 1u);
+    output[idx] = pack_rgba8(avg);
 }

@@ -75,7 +75,11 @@ pub struct Renderer {
     pub(crate) frame_buf:  Option<wgpu::Buffer>,
     /// Output pixel buffer (RGBA8). `@group(1) @binding(2)`.
     pub(crate) output_buf: Option<wgpu::Buffer>,
-    /// Dimensions of the current output buffer; used to detect resizes.
+    /// Float accumulation buffer (RGBA f32, one vec4 per pixel). `@group(1) @binding(3)`.
+    /// Stores the running sum of all samples so the shader can compute a
+    /// progressive average without reading back to the CPU between dispatches.
+    pub(crate) accum_buf:  Option<wgpu::Buffer>,
+    /// Dimensions of the current output/accum buffers; used to detect resizes.
     pub(crate) output_dims: (u32, u32),
 
     // ── Pipeline (built lazily on first render_frame) ────────────────────────
@@ -140,6 +144,7 @@ impl Renderer {
             camera_buf:    None,
             frame_buf:     None,
             output_buf:    None,
+            accum_buf:     None,
             output_dims:   (0, 0),
             scene_bgl:     None,
             frame_bgl:     None,
@@ -243,14 +248,15 @@ impl Renderer {
             }
         );
 
-        // Group 1: per-frame data — two uniforms + one read-write storage.
+        // Group 1: per-frame data — two uniforms + two read-write storage buffers.
         let frame_bgl = self.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 label: Some("frame_bgl"),
                 entries: &[
                     uniform(0),     // camera
                     uniform(1),     // frame (width, height, sample_index)
-                    storage_rw(2),  // output pixel buffer
+                    storage_rw(2),  // output pixel buffer (RGBA8 u32)
+                    storage_rw(3),  // accumulation buffer (RGBA f32)
                 ],
             }
         );
@@ -338,7 +344,7 @@ impl Renderer {
     /// afterwards to read the result back to the CPU.
     ///
     /// Panics if [`upload_scene`] or [`upload_camera`] has not been called.
-    pub fn render_frame(&mut self, width: u32, height: u32) {
+    pub fn render_frame(&mut self, width: u32, height: u32, sample_index: u32) {
         assert!(self.is_scene_loaded(), "render_frame called before upload_scene");
         assert!(self.camera_buf.is_some(), "render_frame called before upload_camera");
 
@@ -347,9 +353,10 @@ impl Renderer {
             self.build_pipeline();
         }
 
-        // (Re)create the output buffer when dimensions change.
+        // (Re)create the output and accumulation buffers when dimensions change.
         let pixel_count = (width * height) as u64;
-        let output_size = pixel_count * 4; // 4 bytes per RGBA8 pixel
+        let output_size = pixel_count * 4;   // 4 bytes per RGBA8 pixel
+        let accum_size  = pixel_count * 16;  // 16 bytes per RGBA f32 pixel
         if self.output_dims != (width, height) {
             self.output_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label:              Some("output"),
@@ -357,11 +364,17 @@ impl Renderer {
                 usage:              wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
+            self.accum_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label:              Some("accum"),
+                size:               accum_size,
+                usage:              wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }));
             self.output_dims = (width, height);
         }
 
         // Upload frame uniforms.
-        let frame_data = FrameUniforms { width, height, sample_index: 0, _pad: 0 };
+        let frame_data = FrameUniforms { width, height, sample_index, _pad: 0 };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
             None => {
@@ -394,6 +407,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.frame_buf.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: self.output_buf.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.accum_buf.as_ref().unwrap().as_entire_binding() },
             ],
         });
 
