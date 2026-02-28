@@ -8,11 +8,6 @@ and when items are completed (remove them and update README + CLAUDE.md).
 
 ## Interface Features
 
-- **Control panel restructure: vertical tabs** — the current left panel is a flat list that will get cluttered as controls accumulate. Restructure it into vertical tabs (e.g., Scene, Camera, Render, Environment) so each group of related controls has its own pane. Needs design thought before implementation: what tabs make sense, what goes in each, and how the tab bar behaves at different panel heights.
-- **Scene selector dropdown** — replace the current row of per-scene buttons with a `<select>` dropdown. Less visual noise, scales to any number of scenes without reflowing the panel. Show the selected scene's attribution text beneath the dropdown once a choice is made, rather than always displaying it.
-- **Environment map selector dropdown** — a companion `<select>` for choosing the IBL/HDRI environment from a list of built-in options (plus a "Load from file…" entry that opens the existing file picker). Mirrors the scene selector pattern.
-- **Environment visibility toggle** — a checkbox to control whether the environment map is rendered as the scene background, or used only as a lighting source with a neutral (black/grey) background. Currently the HDRI always renders; some users want clean studio lighting without a visible sky.
-- **Adjustable sample count** — let the user choose render quality (e.g., 32 / 128 / 512 spp) instead of the hard-coded 256. A fast "preview quality" option would be useful for large canvases.
 - **Save rendered image** — "Save PNG" button that exports the current canvas contents via `canvas.toBlob()`. Trivial to implement, high user value.
 - **Camera FOV slider** — expose the vertical field of view so the user can switch between telephoto (narrow) and wide-angle looks without editing code.
 - **Orbit pan mode** — hold Shift while dragging to translate the orbit target instead of rotating around it, so the user can reframe without zooming.

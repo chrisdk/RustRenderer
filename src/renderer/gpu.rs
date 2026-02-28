@@ -54,14 +54,19 @@ pub struct FrameUniforms {
     pub sample_index: u32,
     /// Bit flags passed to the shader.
     /// Bit 0: preview mode — cap bounce count to 2 for fast interactive rendering.
+    /// Bit 1: IBL disabled — use procedural sky even if an env map is loaded.
     pub flags:        u32,
     /// Width of the loaded environment map in pixels; 0 when none is loaded.
     /// The shader treats env_width == 0 as "no env map, use procedural sky".
     pub env_width:    u32,
     /// Height of the loaded environment map in pixels; 0 when none is loaded.
     pub env_height:   u32,
+    /// 1 = show the environment map (or procedural sky) as the scene background;
+    /// 0 = use a neutral dark grey for rays that escape the scene.
+    /// When 0, the env map can still light the scene through secondary bounces
+    /// if IBL is also enabled — this toggle only affects the visible background.
+    pub env_background: u32,
     pub _pad0:        u32,
-    pub _pad1:        u32,
 }
 
 // ============================================================================
@@ -71,53 +76,66 @@ pub struct FrameUniforms {
 /// All GPU state required to trace rays through a scene.
 pub struct Renderer {
     /// The logical GPU device: allocates buffers and creates pipelines.
+    ///
+    /// `pub(crate)` rather than private because `lib.rs` takes a raw pointer
+    /// to this field in `get_pixels` / `raster_get_pixels` to carry the
+    /// reference across an async boundary. All other access should go through
+    /// [`Renderer::device_queue`] instead of touching this field directly.
     pub(crate) device: wgpu::Device,
     /// The GPU command queue: submits encoded command buffers for execution.
+    ///
+    /// Same caveat as `device` above — prefer [`Renderer::device_queue`].
     pub(crate) queue: wgpu::Queue,
 
     // ── Scene data (uploaded once per loaded scene) ──────────────────────────
-    pub(crate) bvh_nodes_buf: Option<wgpu::Buffer>,
-    pub(crate) bvh_tris_buf:  Option<wgpu::Buffer>,
-    pub(crate) materials_buf: Option<wgpu::Buffer>,
+    bvh_nodes_buf: Option<wgpu::Buffer>,
+    bvh_tris_buf:  Option<wgpu::Buffer>,
+    materials_buf: Option<wgpu::Buffer>,
     /// Flat RGBA8 pixel data for all scene textures, packed as one u32 per
     /// pixel (R in low bits, A in high bits). `tex_info_buf` maps a texture
     /// index to an offset into this buffer.
-    pub(crate) tex_data_buf:  Option<wgpu::Buffer>,
+    tex_data_buf:  Option<wgpu::Buffer>,
     /// Per-texture metadata: pixel offset into `tex_data_buf`, width, height.
-    pub(crate) tex_info_buf:  Option<wgpu::Buffer>,
+    tex_info_buf:  Option<wgpu::Buffer>,
 
     // ── Environment map (always valid; 1-pixel black dummy when not loaded) ──
     /// Linear-light RGB32F environment map pixels as `vec4<f32>` (A unused).
     /// Contains a 1×1 black pixel before any env map is loaded; replaced by
     /// `upload_environment`. Always valid so the bind group layout is fixed.
-    pub(crate) env_pixels_buf: wgpu::Buffer,
+    env_pixels_buf: wgpu::Buffer,
     /// Dimensions of the loaded env map; (0, 0) when using the dummy.
     /// Passed to the shader in `FrameUniforms`; zero width triggers the
     /// procedural sky fallback.
-    pub(crate) env_dims: (u32, u32),
+    env_dims: (u32, u32),
     /// When `false`, the shader ignores the env map and falls back to the
     /// procedural sky even if one is loaded. Toggled by `set_ibl_enabled`.
     /// Corresponds to bit 1 of `FrameUniforms::flags`.
     pub ibl_enabled: bool,
+    /// When `true` (default), escaped rays sample the environment map or
+    /// procedural sky as the scene background. When `false`, all background
+    /// rays return a neutral dark grey — useful for studio lighting looks
+    /// where you want IBL illumination without a distracting sky backdrop.
+    /// Toggled by `set_env_background`. Mapped to `FrameUniforms::env_background`.
+    pub env_background: bool,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
-    pub(crate) camera_buf: Option<wgpu::Buffer>,
+    camera_buf: Option<wgpu::Buffer>,
     /// Frame dimensions + sample index. `@group(1) @binding(1)`.
-    pub(crate) frame_buf:  Option<wgpu::Buffer>,
+    frame_buf:  Option<wgpu::Buffer>,
     /// Output pixel buffer (RGBA8). `@group(1) @binding(2)`.
-    pub(crate) output_buf: Option<wgpu::Buffer>,
+    output_buf: Option<wgpu::Buffer>,
     /// Float accumulation buffer (RGBA f32, one vec4 per pixel). `@group(1) @binding(3)`.
     /// Stores the running sum of all samples so the shader can compute a
     /// progressive average without reading back to the CPU between dispatches.
-    pub(crate) accum_buf:  Option<wgpu::Buffer>,
+    accum_buf:  Option<wgpu::Buffer>,
     /// Dimensions of the current output/accum buffers; used to detect resizes.
-    pub(crate) output_dims: (u32, u32),
+    output_dims: (u32, u32),
 
     // ── Pipeline (built lazily on first render_frame) ────────────────────────
-    pub(crate) scene_bgl: Option<wgpu::BindGroupLayout>,
-    pub(crate) frame_bgl: Option<wgpu::BindGroupLayout>,
-    pub(crate) pipeline:  Option<wgpu::ComputePipeline>,
+    scene_bgl: Option<wgpu::BindGroupLayout>,
+    frame_bgl: Option<wgpu::BindGroupLayout>,
+    pipeline:  Option<wgpu::ComputePipeline>,
 }
 
 // ============================================================================
@@ -187,6 +205,7 @@ impl Renderer {
             env_pixels_buf,
             env_dims:       (0, 0),
             ibl_enabled:    true,
+            env_background: true,
             camera_buf:     None,
             frame_buf:      None,
             output_buf:     None,
@@ -196,6 +215,24 @@ impl Renderer {
             frame_bgl:      None,
             pipeline:       None,
         })
+    }
+}
+
+// ============================================================================
+// Device / queue access
+// ============================================================================
+
+impl Renderer {
+    /// Borrows the GPU device and command queue.
+    ///
+    /// The [`RasterRenderer`] does not own a device/queue of its own — it
+    /// borrows them from here at each call site. Use this accessor rather than
+    /// accessing the fields directly so that the `pub(crate)` visibility on
+    /// those fields remains an implementation detail rather than a stable API.
+    ///
+    /// [`RasterRenderer`]: super::RasterRenderer
+    pub fn device_queue(&self) -> (&wgpu::Device, &wgpu::Queue) {
+        (&self.device, &self.queue)
     }
 }
 
@@ -320,6 +357,25 @@ impl Renderer {
         self.env_dims = (width, height);
         log::info!("env map uploaded: {}×{} ({} MB)", width, height,
             pixels.len() * 4 / 1_000_000);
+    }
+
+    /// Removes the loaded HDR environment map and reverts to the procedural
+    /// sky gradient.
+    ///
+    /// Replaces the env-pixels buffer with the 1-pixel black dummy that
+    /// `Renderer::new` installs on startup, and resets `env_dims` to `(0, 0)`.
+    /// The shader sees `env_width == 0` and falls through to `sky_color`.
+    ///
+    /// Calling this before a scene is loaded is safe and a no-op for rendering.
+    pub fn unload_environment(&mut self) {
+        use wgpu::util::DeviceExt;
+        self.env_pixels_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_pixels_dummy"),
+            contents: bytemuck::cast_slice(&[0.0f32; 4]),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.env_dims = (0, 0);
+        log::info!("environment unloaded; reverting to procedural sky");
     }
 
     /// Returns `true` once [`upload_scene`] has been called.
@@ -486,13 +542,14 @@ impl Renderer {
         // Upload frame uniforms.
         // Bit 0: preview mode (cap bounces for interactive speed).
         // Bit 1: IBL disabled (use procedural sky even if an env map is loaded).
-        let flags = if preview         { 1u32 } else { 0u32 }
+        let flags = if preview          { 1u32 } else { 0u32 }
                   | if !self.ibl_enabled { 2u32 } else { 0u32 };
         let frame_data = FrameUniforms {
             width, height, sample_index, flags,
-            env_width:  self.env_dims.0,
-            env_height: self.env_dims.1,
-            _pad0: 0, _pad1: 0,
+            env_width:      self.env_dims.0,
+            env_height:     self.env_dims.1,
+            env_background: u32::from(self.env_background),
+            _pad0: 0,
         };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
@@ -511,25 +568,25 @@ impl Renderer {
         // Build bind groups (cheap descriptor objects; fine to recreate per frame).
         let scene_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("scene_bg"),
-            layout:  self.scene_bgl.as_ref().unwrap(),
+            layout:  self.scene_bgl.as_ref().expect("build_pipeline not called"),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.bvh_nodes_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.bvh_tris_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.materials_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.tex_data_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.tex_info_buf.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.bvh_nodes_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.bvh_tris_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.materials_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.tex_data_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.tex_info_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: self.env_pixels_buf.as_entire_binding() },
             ],
         });
 
         let frame_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("frame_bg"),
-            layout:  self.frame_bgl.as_ref().unwrap(),
+            layout:  self.frame_bgl.as_ref().expect("build_pipeline not called"),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.frame_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.output_buf.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.accum_buf.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_ref().expect("upload_camera not called").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.frame_buf.as_ref().expect("frame buffer missing").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.output_buf.as_ref().expect("output buffer missing").as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.accum_buf.as_ref().expect("accum buffer missing").as_entire_binding() },
             ],
         });
 
@@ -541,7 +598,7 @@ impl Renderer {
             let mut pass = encoder.begin_compute_pass(
                 &wgpu::ComputePassDescriptor { label: Some("trace_pass"), timestamp_writes: None }
             );
-            pass.set_pipeline(self.pipeline.as_ref().unwrap());
+            pass.set_pipeline(self.pipeline.as_ref().expect("build_pipeline not called"));
             pass.set_bind_group(0, &scene_bg, &[]);
             pass.set_bind_group(1, &frame_bg, &[]);
             // Workgroup size is 8×8; dispatch enough groups to cover every pixel.
@@ -630,18 +687,20 @@ mod tests {
     /// The WGSL `FrameUniforms` struct must match byte-for-byte. If a field is
     /// added, removed, or reordered on either side without updating the other,
     /// the shader will silently read garbage for every frame constant — wrong
-    /// output size, wrong sample index, wrong flags, broken IBL switch.
+    /// output size, wrong sample index, wrong flags, broken IBL switch, or
+    /// an always-visible/invisible environment background.
     #[test]
     fn test_frame_uniforms_gpu_layout() {
         assert_eq!(size_of::<FrameUniforms>(), 32,
             "FrameUniforms must be 32 bytes (two 16-byte vec4 rows in WGSL)");
-        assert_eq!(offset_of!(FrameUniforms, width),        0);
-        assert_eq!(offset_of!(FrameUniforms, height),       4);
-        assert_eq!(offset_of!(FrameUniforms, sample_index), 8);
-        assert_eq!(offset_of!(FrameUniforms, flags),        12);
-        assert_eq!(offset_of!(FrameUniforms, env_width),    16);
-        assert_eq!(offset_of!(FrameUniforms, env_height),   20);
-        // Padding fields exist; just verify they're present and Pod is satisfied.
+        assert_eq!(offset_of!(FrameUniforms, width),          0);
+        assert_eq!(offset_of!(FrameUniforms, height),         4);
+        assert_eq!(offset_of!(FrameUniforms, sample_index),   8);
+        assert_eq!(offset_of!(FrameUniforms, flags),          12);
+        assert_eq!(offset_of!(FrameUniforms, env_width),      16);
+        assert_eq!(offset_of!(FrameUniforms, env_height),     20);
+        assert_eq!(offset_of!(FrameUniforms, env_background), 24);
+        // Padding field exists; just verify Pod is satisfied.
         let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());
     }
 

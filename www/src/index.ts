@@ -13,7 +13,9 @@ import init, {
     init_renderer,
     load_scene,
     load_environment,
+    unload_environment,
     set_ibl_enabled,
+    set_env_background,
     update_camera,
     render,
     get_pixels,
@@ -23,21 +25,26 @@ import init, {
 } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
 import { Turntable } from './turntable.js';
+import { RenderController } from './render-controller.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM references
 // ─────────────────────────────────────────────────────────────────────────────
 
-const canvas      = document.getElementById('canvas')        as HTMLCanvasElement;
-const ctx         = canvas.getContext('2d')!;
-const statusEl    = document.getElementById('status')!;
-const fileInput   = document.getElementById('file-input')    as HTMLInputElement;
-const envInput    = document.getElementById('env-file-input') as HTMLInputElement;
-const iblToggle   = document.getElementById('ibl-toggle')    as HTMLInputElement;
-const hintsEl     = document.getElementById('hints')!;
-const dropOverlay = document.getElementById('drop-overlay')!;
-const scenePicker = document.getElementById('scene-picker')!;
-const renderBtn   = document.getElementById('render-btn')    as HTMLButtonElement;
+const canvas        = document.getElementById('canvas')         as HTMLCanvasElement;
+const ctx           = canvas.getContext('2d')!;
+const statusEl      = document.getElementById('status')!;
+const fileInput     = document.getElementById('file-input')     as HTMLInputElement;
+const envInput      = document.getElementById('env-file-input') as HTMLInputElement;
+const iblToggle     = document.getElementById('ibl-toggle')     as HTMLInputElement;
+const envBgToggle   = document.getElementById('env-bg-toggle')  as HTMLInputElement;
+const hintsEl       = document.getElementById('hints')!;
+const dropOverlay   = document.getElementById('drop-overlay')!;
+const renderBtn     = document.getElementById('render-btn')     as HTMLButtonElement;
+const sceneSelect   = document.getElementById('scene-select')   as HTMLSelectElement;
+const sceneAttrib   = document.getElementById('scene-attribution')!;
+const envSelect     = document.getElementById('env-select')     as HTMLSelectElement;
+const sampleCount   = document.getElementById('sample-count')   as HTMLSelectElement;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Turntable camera
@@ -58,8 +65,45 @@ function applyTurntable(): void {
     const w = canvas.width  || 1;
     const h = canvas.height || 1;
     update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
-    cameraDirty = true;
+    ctrl.cameraDirty = true;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Render controller
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ctrl = new RenderController({
+    load_scene,
+    get_scene_bounds,
+    render,
+    get_pixels,
+    raster_frame,
+    raster_get_pixels,
+    putImageData: (pixels, w, h) =>
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0),
+    getCanvasSize: () => ({ w: canvas.width || 1, h: canvas.height || 1 }),
+    setStatus,
+    onSceneLoaded: (bounds) => {
+        turntable.autoFrame(bounds);
+        applyTurntable();
+        renderBtn.disabled = false;
+        fadeHints();
+    },
+    lockCamera: (w, h) => {
+        // Lock the viewpoint for the full HQ render. Does NOT set cameraDirty
+        // so a raster frame isn't triggered on top of the path-traced output.
+        const { px, py, pz, yaw, pitch } = turntable.toCameraParams();
+        update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
+    },
+    onHqStart: () => {
+        renderBtn.textContent = 'Cancel';
+        renderBtn.classList.add('cancel');
+    },
+    onHqEnd: (_cancelled) => {
+        renderBtn.textContent = 'Render';
+        renderBtn.classList.remove('cancel');
+    },
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Drag input
@@ -70,13 +114,13 @@ let lastX        = 0;
 let lastY        = 0;
 
 canvas.addEventListener('pointerdown', e => {
-    if (!sceneLoaded) return;
+    if (!ctrl.sceneLoaded) return;
     canvas.setPointerCapture(e.pointerId);
     dragging = true;
     lastX    = e.clientX;
     lastY    = e.clientY;
     canvas.classList.add('dragging');
-    if (hqRendering) hqCancelled = true;
+    ctrl.cancelHighQualityRender();
 });
 
 canvas.addEventListener('pointermove', e => {
@@ -104,7 +148,7 @@ function endDrag(): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 canvas.addEventListener('wheel', e => {
-    if (!sceneLoaded) return;
+    if (!ctrl.sceneLoaded) return;
 
     // Prevent the browser from intercepting the scroll (page scroll or the
     // native two-finger pinch-zoom overlay on macOS). Must be non-passive.
@@ -124,32 +168,9 @@ canvas.addEventListener('wheel', e => {
     //   deltaY > 0  →  scroll down / pinch in  →  zoom out
     turntable.zoom(Math.exp(delta * ZOOM_SPEED));
 
-    if (hqRendering) hqCancelled = true;
+    ctrl.cancelHighQualityRender();
     applyTurntable();
 }, { passive: false }); // passive: false is required to call preventDefault()
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Render loop state  (declared before resizeCanvas so the TDZ doesn't bite)
-// ─────────────────────────────────────────────────────────────────────────────
-
-let sceneLoaded = false;
-let cameraDirty = false;
-let rendering   = false;   // true while an async get_pixels call is in flight
-
-// High-quality progressive render state.
-let hqRendering = false;   // true while the multi-sample render loop is running
-let hqCancelled = false;   // set to true to stop the loop after the current sample
-
-const HQ_SAMPLES = 256;    // samples per pixel for a full quality render
-
-// ── Display strategy ──────────────────────────────────────────────────────────
-//
-// The rasterizer is the primary display: it renders whenever the camera changes
-// (drag, resize, scene load) and its output stays on screen until something
-// replaces it. The path tracer is only used for the explicit "Render" button.
-//
-// This means the canvas always shows a sharp, textured, correctly-lit image
-// even when idle — no progressive noise build-up before the user renders.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Canvas sizing
@@ -161,7 +182,15 @@ function resizeCanvas(): void {
     if (canvas.width !== w || canvas.height !== h) {
         canvas.width  = w;
         canvas.height = h;
-        cameraDirty   = true;
+        if (ctrl.sceneLoaded) {
+            // Update the camera projection with the new aspect ratio, then
+            // mark the camera dirty so the raster loop redraws immediately.
+            // Without this, the first post-resize frame uses the stale aspect
+            // ratio and the scene appears stretched or squished.
+            applyTurntable();
+        } else {
+            ctrl.cameraDirty = true;
+        }
     }
 }
 
@@ -169,33 +198,17 @@ window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render helpers
+// Main animation loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Render one preview frame using the hardware rasterizer.
- *
- * The rasterizer runs entirely on the GPU (no ray traversal, no bounce
- * accumulation) and produces a single complete frame at full canvas resolution
- * in a fraction of a millisecond of GPU time. Called while the camera is in
- * motion so the turntable stays snappy even on complex scenes.
- *
- * The camera is already uploaded before this is called (applyTurntable() does
- * it), so we just dispatch and blit.
- */
-async function renderDragFrame(): Promise<void> {
-    if (rendering) return;
-    rendering = true;
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    raster_frame(w, h);
-    const pixels = await raster_get_pixels(w, h);
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
-
-    rendering = false;
-}
+// ── Display strategy ──────────────────────────────────────────────────────────
+//
+// The rasterizer is the primary display: it renders whenever the camera changes
+// (drag, resize, scene load) and its output stays on screen until something
+// replaces it. The path tracer is only used for the explicit "Render" button.
+//
+// This means the canvas always shows a sharp, textured, correctly-lit image
+// even when idle — no progressive noise build-up before the user renders.
 
 /**
  * Main animation loop.
@@ -205,32 +218,17 @@ async function renderDragFrame(): Promise<void> {
  * explicitly replaces it — so the canvas is always showing something useful.
  */
 function tick(): void {
-    if (!hqRendering && sceneLoaded && !rendering && cameraDirty) {
-        cameraDirty = false;
-        renderDragFrame();
+    if (ctrl.shouldRenderDragFrame()) {
+        ctrl.cameraDirty = false;
+        ctrl.renderDragFrame();
     }
 
     requestAnimationFrame(tick);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scene loading
+// Scene / environment loading
 // ─────────────────────────────────────────────────────────────────────────────
-
-async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
-    setStatus('Loading scene…');
-    try {
-        load_scene(bytes);
-        turntable.autoFrame(get_scene_bounds());
-        applyTurntable();
-        sceneLoaded = true;
-        renderBtn.disabled = false;
-        setStatus('Drag to spin · click Render for full quality');
-        fadeHints();
-    } catch (err) {
-        setStatus(`Error: ${err}`);
-    }
-}
 
 /**
  * Decodes and uploads a Radiance HDR (.hdr) environment map.
@@ -249,100 +247,126 @@ async function loadEnvironmentBytes(bytes: Uint8Array): Promise<void> {
     }
 }
 
-// ── High-quality render ───────────────────────────────────────────────────────
-
-/**
- * Progressively accumulate HQ_SAMPLES samples into the same image.
- */
-async function startHighQualityRender(): Promise<void> {
-    if (!sceneLoaded || hqRendering) return;
-
-    while (rendering) {
-        await new Promise<void>(r => setTimeout(r, 16));
-    }
-
-    hqRendering = true;
-    hqCancelled = false;
-    rendering   = true;
-    renderBtn.textContent = 'Cancel';
-    renderBtn.classList.add('cancel');
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    // Lock in the current camera for the full render. Use toCameraParams()
-    // rather than applyTurntable() to avoid setting cameraDirty, which would
-    // trigger a raster frame on top of the path-traced output.
-    const { px, py, pz, yaw, pitch } = turntable.toCameraParams();
-    update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
-
-    for (let i = 0; i < HQ_SAMPLES && !hqCancelled; i++) {
-        render(w, h, i, false);
-        const pixels = await get_pixels(w, h);
-        ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
-        setStatus(`Rendering… ${i + 1} / ${HQ_SAMPLES} spp`);
-    }
-
-    rendering   = false;
-    hqRendering = false;
-    renderBtn.textContent = 'Render';
-    renderBtn.classList.remove('cancel');
-
-    if (hqCancelled) {
-        setStatus('Render cancelled — drag to spin');
-        cameraDirty = true;
-    } else {
-        setStatus(`Done — ${HQ_SAMPLES} spp`);
-    }
-}
+// ── Render button ─────────────────────────────────────────────────────────────
 
 renderBtn.addEventListener('click', () => {
-    if (hqRendering) {
-        hqCancelled = true;
+    if (ctrl.hqRendering) {
+        ctrl.cancelHighQualityRender();
     } else {
-        startHighQualityRender();
+        ctrl.startHighQualityRender();
     }
 });
 
-// ── Built-in scene picker ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Tab switching
+// ─────────────────────────────────────────────────────────────────────────────
 
-function buildScenePicker(): void {
-    let activeBtn: HTMLButtonElement | null = null;
+document.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(`tab-${btn.dataset.tab}`)?.classList.add('active');
+    });
+});
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene dropdown
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Populates the scene `<select>` from BUILTIN_SCENES and wires the change
+ * handler to download and load the chosen scene.
+ *
+ * Attribution text for licensed assets (CC BY 4.0 etc.) is shown below the
+ * dropdown when a non-CC0 scene is selected, and cleared for CC0 assets.
+ */
+function buildSceneDropdown(): void {
     for (const scene of BUILTIN_SCENES) {
-        const btn = document.createElement('button');
-        btn.className   = 'scene-btn';
-        btn.textContent = scene.label;
-
-        btn.addEventListener('click', async () => {
-            if (activeBtn) activeBtn.classList.remove('active');
-            activeBtn = btn;
-            btn.classList.add('active');
-
-            setStatus('Downloading scene…');
-            const glb = await Promise.resolve(scene.build());
-            await loadSceneBytes(new Uint8Array(glb));
-        });
-
-        scenePicker.appendChild(btn);
-
-        // Show required attribution below the button for non-CC0 assets.
-        if (scene.attribution) {
-            const attr = document.createElement('div');
-            attr.className   = 'scene-attribution';
-            attr.textContent = scene.attribution;
-            scenePicker.appendChild(attr);
-        }
+        const opt = document.createElement('option');
+        opt.value       = scene.name;
+        opt.textContent = scene.label;
+        sceneSelect.appendChild(opt);
     }
+
+    sceneSelect.addEventListener('change', async () => {
+        const scene = BUILTIN_SCENES.find(s => s.name === sceneSelect.value);
+        if (!scene) return;
+
+        // Show attribution for non-CC0 assets; clear it for public-domain ones.
+        sceneAttrib.textContent = scene.attribution ?? '';
+
+        setStatus('Downloading scene…');
+        const glb = await Promise.resolve(scene.build());
+        await ctrl.loadSceneBytes(new Uint8Array(glb), scene.name);
+    });
 }
 
-// ── File picker ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment dropdown
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Wires the environment `<select>` dropdown.
+ *
+ * Three kinds of options:
+ *   - `""` (Procedural sky) — calls unload_environment() and reverts to the
+ *     built-in sky gradient.
+ *   - Named .hdr file — fetches it from the `assets/` directory.
+ *   - `"__file__"` (Load from file…) — programmatically clicks the hidden
+ *     file input; the select value reverts so the picker reads "Load from
+ *     file…" only while the native dialog is open.
+ *
+ * After a custom file is loaded, a "Custom: <filename>" option is
+ * inserted/replaced so the dropdown reflects the active environment.
+ */
+function buildEnvDropdown(): void {
+    // Track the last successfully applied env value so we can revert the
+    // select when "Load from file…" is chosen but the user cancels the picker.
+    let lastEnvValue = envSelect.value;  // starts at "" (Procedural sky)
+
+    envSelect.addEventListener('change', async () => {
+        const val = envSelect.value;
+
+        if (val === '__file__') {
+            // Revert to the previous choice; the real change happens when the
+            // file picker fires its 'change' event below.
+            envSelect.value = lastEnvValue;
+            envInput.click();
+            return;
+        }
+
+        lastEnvValue = val;
+
+        if (val === '') {
+            // Revert to procedural sky — clear any loaded HDR.
+            unload_environment();
+            ctrl.cancelHighQualityRender();
+            setStatus('Using procedural sky');
+        } else {
+            // Fetch a named built-in HDR from the assets directory.
+            setStatus('Loading environment…');
+            try {
+                const r = await fetch(`assets/${val}`);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const buf = await r.arrayBuffer();
+                await loadEnvironmentBytes(new Uint8Array(buf));
+            } catch (err) {
+                setStatus(`Environment error: ${err}`);
+            }
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File pickers
+// ─────────────────────────────────────────────────────────────────────────────
 
 fileInput.addEventListener('change', async () => {
     const file = fileInput.files?.[0];
     if (!file) return;
     const buffer = await file.arrayBuffer();
-    await loadSceneBytes(new Uint8Array(buffer));
+    await ctrl.loadSceneBytes(new Uint8Array(buffer), `${file.name}:${file.size}`);
 });
 
 envInput.addEventListener('change', async () => {
@@ -350,9 +374,23 @@ envInput.addEventListener('change', async () => {
     if (!file) return;
     const buffer = await file.arrayBuffer();
     await loadEnvironmentBytes(new Uint8Array(buffer));
+
+    // Insert or replace the "Custom: <name>" option so the dropdown reflects
+    // the file that was just loaded.
+    const CUSTOM_VALUE = '__custom__';
+    let customOpt = envSelect.querySelector<HTMLOptionElement>(`option[value="${CUSTOM_VALUE}"]`);
+    if (!customOpt) {
+        customOpt = document.createElement('option');
+        customOpt.value = CUSTOM_VALUE;
+        // Insert before the separator (the disabled "──────────" option).
+        const separator = envSelect.querySelector<HTMLOptionElement>('option[disabled]');
+        envSelect.insertBefore(customOpt, separator ?? null);
+    }
+    customOpt.textContent = `Custom: ${file.name}`;
+    envSelect.value = CUSTOM_VALUE;
 });
 
-// ── Drag-and-drop ────────────────────────────────────────────────────────────
+// ── Drag-and-drop ─────────────────────────────────────────────────────────────
 
 window.addEventListener('dragenter', e => {
     e.preventDefault();
@@ -376,8 +414,40 @@ window.addEventListener('drop', async e => {
     if (file.name.toLowerCase().endsWith('.hdr')) {
         await loadEnvironmentBytes(new Uint8Array(buffer));
     } else {
-        await loadSceneBytes(new Uint8Array(buffer));
+        await ctrl.loadSceneBytes(new Uint8Array(buffer), `${file.name}:${file.size}`);
     }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IBL toggle
+// ─────────────────────────────────────────────────────────────────────────────
+
+iblToggle.addEventListener('change', () => {
+    set_ibl_enabled(iblToggle.checked);
+    // Cancelling the HQ render causes it to restart from scratch on the next
+    // Render click — necessary because the IBL toggle changes the lighting and
+    // would otherwise blend old (no IBL) and new (IBL) samples together.
+    ctrl.cancelHighQualityRender();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment background toggle
+// ─────────────────────────────────────────────────────────────────────────────
+
+envBgToggle.addEventListener('change', () => {
+    set_env_background(envBgToggle.checked);
+    // Same reason as the IBL toggle: changing the background invalidates any
+    // accumulated samples — old ones used the env map, new ones would use dark
+    // grey, so blending them gives garbage.
+    ctrl.cancelHighQualityRender();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sample-count selector
+// ─────────────────────────────────────────────────────────────────────────────
+
+sampleCount.addEventListener('change', () => {
+    ctrl.hqSamples = parseInt(sampleCount.value, 10);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -396,19 +466,6 @@ function fadeHints(): void {
 // Boot sequence
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// IBL toggle
-// ─────────────────────────────────────────────────────────────────────────────
-
-iblToggle.addEventListener('change', () => {
-    set_ibl_enabled(iblToggle.checked);
-    // Restart the HQ render if it's running, or mark camera dirty so
-    // the next Render click starts fresh (accumulator reset happens in WASM).
-    if (hqRendering) {
-        hqCancelled = true;
-    }
-});
-
 async function main(): Promise<void> {
     setStatus('Loading WASM…');
     try {
@@ -419,7 +476,8 @@ async function main(): Promise<void> {
         return;
     }
 
-    buildScenePicker();
+    buildSceneDropdown();
+    buildEnvDropdown();
 
     setStatus('Requesting GPU…');
     try {
@@ -433,15 +491,21 @@ async function main(): Promise<void> {
     // Kick off the default env map fetch in the background — the renderer
     // is perfectly usable without it; it just falls back to procedural sky.
     // We don't await this so the rest of the UI comes up immediately.
+    // Reflect the pending load in the dropdown so the user sees what's loading.
+    envSelect.value = 'golden_gate_hills_2k.hdr';
     fetch('assets/golden_gate_hills_2k.hdr')
         .then(r => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             return r.arrayBuffer();
         })
         .then(buf => loadEnvironmentBytes(new Uint8Array(buf)))
-        .catch(err => console.warn('Default env map not loaded:', err));
+        .catch(err => {
+            console.warn('Default env map not loaded:', err);
+            // Revert the dropdown to "Procedural sky" since nothing loaded.
+            envSelect.value = '';
+        });
 
-    setStatus('Choose a scene below, or drop a GLTF / GLB file');
+    setStatus('Choose a scene, or drop a GLTF / GLB file');
 
     tick();
 }

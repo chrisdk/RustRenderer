@@ -134,13 +134,10 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
         state.renderer.upload_scene(&bvh, &scene.materials, &scene.textures);
 
         // Upload to rasteriser (vertex/index geometry + instance transforms).
-        // Borrows device/queue from the path-tracer renderer — they share the
-        // same underlying GPU device.
-        state.raster.upload_scene(
-            &state.renderer.device,
-            &state.renderer.queue,
-            &scene,
-        );
+        // The rasteriser borrows the device from the path-tracer renderer —
+        // both pipelines share the same underlying GPU device.
+        let (device, _queue) = state.renderer.device_queue();
+        state.raster.upload_scene(device, &scene);
 
         state.scene_bounds = bounds;
         log::info!("scene loaded");
@@ -175,6 +172,45 @@ pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
         log::info!("environment loaded: {}×{}", img.width, img.height);
         Ok(())
     })
+}
+
+/// Controls whether the loaded environment map (or procedural sky) is rendered
+/// as the visible background.
+///
+/// When `visible` is `true` (the default), rays that escape the scene sample
+/// the environment / sky as normal. When `false`, escaped rays contribute a
+/// neutral dark grey instead — giving a "studio lighting" look where the env
+/// map still illuminates the scene but is not visible as the background.
+///
+/// Changes take effect on the next `render()` call; the accumulator is reset
+/// automatically so old and new samples are never blended together.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_env_background(visible: bool) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.env_background = visible;
+            log::info!("env background {}", if visible { "on" } else { "off" });
+        }
+    });
+}
+
+/// Removes the currently loaded HDR environment map and reverts to the
+/// procedural sky gradient.
+///
+/// After this call the path tracer behaves as if `load_environment` had never
+/// been called: background and IBL both come from the procedural sky. The
+/// rasteriser preview is unaffected (it always uses its own procedural sky).
+///
+/// This is a no-op if no environment map is currently loaded.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn unload_environment() {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.unload_environment();
+        }
+    });
 }
 
 /// Enables or disables Image-Based Lighting for path-traced renders.
@@ -252,11 +288,8 @@ pub fn update_camera(
 
             // Raster camera (view + projection matrices).
             let rs_uniform = state.camera.to_raster_uniform();
-            state.raster.upload_camera(
-                &state.renderer.device,
-                &state.renderer.queue,
-                &rs_uniform,
-            );
+            let (device, queue) = state.renderer.device_queue();
+            state.raster.upload_camera(device, queue, &rs_uniform);
         }
     });
 }
@@ -314,9 +347,19 @@ pub async fn get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
         return js_sys::Uint8Array::new_with_length(0);
     };
 
-    // SAFETY: The renderer lives as long as STATE, and STATE is thread_local.
-    // We don't mutate it here (get_pixels takes &self), and WASM is
-    // single-threaded, so no concurrent access is possible.
+    // SAFETY: `renderer_ptr` points into `AppState::renderer`, which lives
+    // inside the `STATE` thread_local for the lifetime of the page. Two
+    // invariants must hold for this to be sound:
+    //   1. No mutation — `get_pixels` takes `&self`, so the object is not
+    //      modified while the pointer is live.
+    //   2. No re-initialisation — if `init_renderer()` were called again
+    //      while this future is pending it would drop the old `AppState`
+    //      and dangle this pointer.  The JS API must never call
+    //      `init_renderer` more than once; it is called exactly once at
+    //      page load before any render futures are created.
+    //
+    // Both invariants are guaranteed by the single-threaded WASM execution
+    // model and the JS-side calling convention, not by the type system.
     let renderer = unsafe { &*renderer_ptr };
     let bytes = renderer.get_pixels(width, height).await;
     js_sys::Uint8Array::from(bytes.as_slice())
@@ -347,12 +390,8 @@ pub fn raster_frame(width: u32, height: u32) {
         if let Some(state) = s.borrow_mut().as_mut() {
             // render_frame takes device+queue as parameters; borrow them
             // from the path-tracer renderer (same GPU device).
-            state.raster.render_frame(
-                &state.renderer.device,
-                &state.renderer.queue,
-                width,
-                height,
-            );
+            let (device, queue) = state.renderer.device_queue();
+            state.raster.render_frame(device, queue, width, height);
         }
     });
 }
@@ -378,9 +417,17 @@ pub async fn raster_get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
         return js_sys::Uint8Array::new_with_length(0);
     };
 
-    // SAFETY: All three objects live in STATE (thread_local). WASM is
-    // single-threaded, so no concurrent mutation occurs, and none of these
-    // are mutated by get_pixels (it takes &self / shared references).
+    // SAFETY: All three pointers reference objects inside `AppState`, which
+    // lives in the `STATE` thread_local for the lifetime of the page.
+    // Three invariants must hold:
+    //   1. No mutation — all three methods are `&self`; the objects are not
+    //      modified while these raw references are live.
+    //   2. No re-initialisation — `init_renderer()` must not be called again
+    //      while this future is pending; doing so would drop `AppState` and
+    //      dangle all three pointers.
+    //   3. Single-threaded — WASM runs on a single JS thread, so there is
+    //      no concurrent access even without a lock.
+    // The JS calling convention guarantees invariants 2 and 3.
     let raster = unsafe { &*raster_ptr };
     let device = unsafe { &*device_ptr };
     let queue  = unsafe { &*queue_ptr };

@@ -144,9 +144,8 @@ impl RasterRenderer {
     /// The draw call list is rebuilt from the new scene's instance table.
     pub fn upload_scene(
         &mut self,
-        device:   &wgpu::Device,
-        queue:    &wgpu::Queue,
-        scene:    &Scene,
+        device: &wgpu::Device,
+        scene:  &Scene,
     ) {
         use wgpu::util::DeviceExt;
 
@@ -267,7 +266,6 @@ impl RasterRenderer {
         // still valid, but some callers may call upload_scene before ever
         // calling render_frame, so we build eagerly to surface shader errors
         // during loading rather than during the first frame.
-        let _ = queue;  // queue not needed for buffer uploads (create_buffer_init handles it)
         self.build_pipeline(device);
     }
 
@@ -505,35 +503,35 @@ impl RasterRenderer {
             self.output_dims = (width, height);
         }
 
-        let output_view = self.output_tex.as_ref().unwrap()
+        let output_view = self.output_tex.as_ref().expect("output texture missing")
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = self.depth_tex.as_ref().unwrap()
+        let depth_view = self.depth_tex.as_ref().expect("depth texture missing")
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // ── Build bind group ─────────────────────────────────────────────────
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:   Some("raster_bg"),
-            layout:  self.bgl.as_ref().unwrap(),
+            layout:  self.bgl.as_ref().expect("build_pipeline not called"),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding:  0,
-                    resource: self.camera_buf.as_ref().unwrap().as_entire_binding(),
+                    resource: self.camera_buf.as_ref().expect("upload_camera not called").as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding:  1,
-                    resource: self.instance_buf.as_ref().unwrap().as_entire_binding(),
+                    resource: self.instance_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding:  2,
-                    resource: self.material_buf.as_ref().unwrap().as_entire_binding(),
+                    resource: self.material_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding:  3,
-                    resource: self.tex_data_buf.as_ref().unwrap().as_entire_binding(),
+                    resource: self.tex_data_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding:  4,
-                    resource: self.tex_info_buf.as_ref().unwrap().as_entire_binding(),
+                    resource: self.tex_info_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
                 },
             ],
         });
@@ -572,11 +570,11 @@ impl RasterRenderer {
                 multiview_mask:      None,
             });
 
-            pass.set_pipeline(self.pipeline.as_ref().unwrap());
+            pass.set_pipeline(self.pipeline.as_ref().expect("build_pipeline not called"));
             pass.set_bind_group(0, &bg, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buf.as_ref().unwrap().slice(..));
+            pass.set_vertex_buffer(0, self.vertex_buf.as_ref().expect("upload_scene not called").slice(..));
             pass.set_index_buffer(
-                self.index_buf.as_ref().unwrap().slice(..),
+                self.index_buf.as_ref().expect("upload_scene not called").slice(..),
                 wgpu::IndexFormat::Uint32,
             );
 

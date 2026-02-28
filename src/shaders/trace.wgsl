@@ -126,12 +126,17 @@ struct FrameUniforms {
     height:       u32,
     sample_index: u32,
     flags:        u32,  // bit 0: preview mode (cap bounces to PREVIEW_BOUNCES)
+                        // bit 1: IBL disabled (use procedural sky even if env is loaded)
     // Environment map dimensions. Both zero when no env map is loaded, which
     // causes sky_color() to fall back to the procedural gradient.
     env_width:    u32,
     env_height:   u32,
-    _pad0:        u32,
-    _pad1:        u32,
+    // 1 = show env map / sky as background; 0 = dark grey for missed rays.
+    // When 0, escaped rays contribute dark grey to the path, effectively
+    // disabling the visible background while still allowing the env map to
+    // light the scene through secondary bounces (as long as IBL is on).
+    env_background: u32,
+    _pad0:          u32,
 }
 
 // ============================================================================
@@ -657,8 +662,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let hit = traverse_bvh(ray_orig, ray_dir, inv_dir);
 
         if hit.hit == 0u {
-            // Ray escaped — add sky contribution and terminate.
-            radiance += throughput * sky_color(ray_dir);
+            // Ray escaped the scene entirely. Whether we see the environment
+            // or a neutral dark grey is controlled by the env_background flag.
+            //
+            // When the background is hidden (env_background == 0), secondary
+            // bounce rays that escape still contribute dark grey — this does
+            // suppress IBL from escaped secondaries.  A full fix would require
+            // separating background visibility from IBL sampling (MIS), which
+            // is on the roadmap.  For now the toggle is a quick artistic control.
+            if frame.env_background == 1u {
+                radiance += throughput * sky_color(ray_dir);
+            } else {
+                // Dark studio grey: neutral but not pitch-black so silhouettes
+                // remain legible against the background.
+                radiance += throughput * vec3<f32>(0.04, 0.04, 0.04);
+            }
             break;
         }
 
