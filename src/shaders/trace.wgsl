@@ -176,11 +176,18 @@ const SUN_DIR: vec3<f32> = vec3<f32>(0.3651, 0.9129, 0.1826);
 const SUN_COS: f32 = 0.99939;
 
 // Sky colours at horizon and zenith, in linear light.
-const SKY_HORIZON: vec3<f32> = vec3<f32>(0.92, 0.85, 0.75);
-const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.20, 0.45, 0.85);
+//
+// These are calibrated for albedo textures that have been correctly decoded
+// from sRGB to linear (pow(x, 2.2)). Linear albedo values are ~2–4× darker
+// than raw sRGB, so the sky must be proportionally dimmer to avoid the bright
+// ambient washing out surface colours.
+const SKY_HORIZON: vec3<f32> = vec3<f32>(0.50, 0.45, 0.38);
+const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.08, 0.22, 0.50);
 
-// Sun radiance. Scaled to produce realistic exposure when the sun is visible.
-const SUN_RADIANCE: vec3<f32> = vec3<f32>(15.0, 13.5, 10.0);
+// Sun radiance. The sun is a small disk so most diffuse rays miss it, but it
+// provides the key specular highlights and hard shadows that give path-traced
+// images their punch. Reduced from the pre-sRGB-fix value for the same reason.
+const SUN_RADIANCE: vec3<f32> = vec3<f32>(10.0, 9.0, 7.0);
 
 // ============================================================================
 // PCG random number generator
