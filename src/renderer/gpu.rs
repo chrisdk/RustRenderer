@@ -41,18 +41,18 @@ use crate::scene::texture::Texture;
 // Supporting types
 // ============================================================================
 
-/// Per-frame shader constants: output dimensions and the sample index (reserved
-/// for progressive accumulation in Phase 4).
+/// Per-frame shader constants: output dimensions, sample index, and render flags.
 ///
-/// Must be 16-byte aligned for a WGSL uniform buffer; the `_pad` field
-/// satisfies the 16-byte minimum size.
+/// Must be 16-byte aligned for a WGSL uniform buffer.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct FrameUniforms {
     pub width:        u32,
     pub height:       u32,
     pub sample_index: u32,
-    pub _pad:         u32,
+    /// Bit flags passed to the shader.
+    /// Bit 0: preview mode — cap bounce count to 2 for fast interactive rendering.
+    pub flags:        u32,
 }
 
 /// Per-texture metadata uploaded to the GPU alongside the flat pixel data.
@@ -411,7 +411,7 @@ impl Renderer {
     /// afterwards to read the result back to the CPU.
     ///
     /// Panics if [`upload_scene`] or [`upload_camera`] has not been called.
-    pub fn render_frame(&mut self, width: u32, height: u32, sample_index: u32) {
+    pub fn render_frame(&mut self, width: u32, height: u32, sample_index: u32, preview: bool) {
         assert!(self.is_scene_loaded(), "render_frame called before upload_scene");
         assert!(self.camera_buf.is_some(), "render_frame called before upload_camera");
 
@@ -441,7 +441,8 @@ impl Renderer {
         }
 
         // Upload frame uniforms.
-        let frame_data = FrameUniforms { width, height, sample_index, _pad: 0 };
+        let flags = if preview { 1u32 } else { 0u32 };
+        let frame_data = FrameUniforms { width, height, sample_index, flags };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
             None => {

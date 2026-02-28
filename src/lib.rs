@@ -192,7 +192,7 @@ pub fn update_camera(
 /// Calling before the scene is loaded is a no-op with a console warning.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn render(width: u32, height: u32, sample_index: u32) {
+pub fn render(width: u32, height: u32, sample_index: u32, preview: bool) {
     let ready = STATE.with(|s| {
         s.borrow()
             .as_ref()
@@ -206,7 +206,7 @@ pub fn render(width: u32, height: u32, sample_index: u32) {
 
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
-            state.renderer.render_frame(width, height, sample_index);
+            state.renderer.render_frame(width, height, sample_index, preview);
         }
     });
 }

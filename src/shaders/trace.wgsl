@@ -118,7 +118,7 @@ struct FrameUniforms {
     width:        u32,
     height:       u32,
     sample_index: u32,
-    _pad:         u32,
+    flags:        u32,  // bit 0: preview mode (cap bounces to PREVIEW_BOUNCES)
 }
 
 // ============================================================================
@@ -147,9 +147,13 @@ const PI:      f32 = 3.14159265358979323846;
 const TWO_PI:  f32 = 6.28318530717958647692;
 const INV_PI:  f32 = 0.31830988618379067154;
 
-// Maximum number of bounces per path before it is forcibly terminated.
-// 12 is enough to resolve most glass caustics and multi-bounce interiors.
+// Maximum bounces in full-quality mode. 12 resolves most glass caustics and
+// multi-bounce interiors. More is diminishing returns for typical scenes.
 const MAX_BOUNCES: i32 = 12;
+
+// Bounce cap for preview/drag mode. 2 bounces = direct light + one reflection
+// or transmission. Cheap enough to stay interactive; still shows PBR materials.
+const PREVIEW_BOUNCES: i32 = 2;
 
 // After this bounce index, Russian roulette may terminate the path.
 const RR_START: i32 = 3;
@@ -589,10 +593,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // `radiance` accumulates the light contributions at each bounce. When the
     // path hits an emissive surface or the sky, the emission is weighted by
     // the current throughput and added to the running total.
+    //
+    // In preview mode (frame.flags bit 0) we cap the bounce count to 2 —
+    // primary ray + one indirect bounce. This is ~4-6× cheaper than 12
+    // bounces and still shows albedo, reflections, and basic lighting.
+    let preview_mode = (frame.flags & 1u) != 0u;
+    let max_bounces  = select(MAX_BOUNCES, PREVIEW_BOUNCES, preview_mode);
+
     var throughput = vec3(1.0);
     var radiance   = vec3(0.0);
 
-    for (var bounce: i32 = 0; bounce < MAX_BOUNCES; bounce++) {
+    for (var bounce: i32 = 0; bounce < max_bounces; bounce++) {
         let inv_dir = vec3(1.0 / ray_dir.x, 1.0 / ray_dir.y, 1.0 / ray_dir.z);
         let hit = traverse_bvh(ray_orig, ray_dir, inv_dir);
 

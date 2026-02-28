@@ -238,12 +238,18 @@ async function renderDragFrame(): Promise<void> {
         ...cameraPos(), -turntable.azimuth, -turntable.elevation, VFOV, w / h,
     );
 
-    render(pw, ph, 0);
+    render(pw, ph, 0, true);
     const pixels = await get_pixels(pw, ph);
+
+    // A 3×3 box blur on the low-res pixels before upscaling. Because the image
+    // is already small (pw×ph ≈ 16% of canvas area) this costs under 1 ms on
+    // the CPU and significantly smooths the single-sample noise without
+    // smearing edges in a noticeable way at display scale.
+    const blurred = boxBlur(new Uint8ClampedArray(pixels), pw, ph);
 
     previewCanvas.width  = pw;
     previewCanvas.height = ph;
-    previewCtx.putImageData(new ImageData(new Uint8ClampedArray(pixels), pw, ph), 0, 0);
+    previewCtx.putImageData(new ImageData(blurred, pw, ph), 0, 0);
 
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'medium';
@@ -274,7 +280,7 @@ async function renderAccumFrame(sampleIdx: number): Promise<void> {
         );
     }
 
-    render(w, h, sampleIdx);
+    render(w, h, sampleIdx, false);
     const pixels = await get_pixels(w, h);
     ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
 
@@ -287,6 +293,41 @@ async function renderAccumFrame(sampleIdx: number): Promise<void> {
     }
 
     rendering = false;
+}
+
+/**
+ * 3×3 box blur — averages each pixel with its 8 neighbours.
+ *
+ * Applied to the low-res drag frame before it is upscaled to the canvas.
+ * The image is already small (PREVIEW_SCALE of the canvas), so the inner
+ * loop touches a trivial number of pixels and finishes in under 1 ms.
+ * The smoothing meaningfully reduces single-sample path-tracing noise
+ * without visibly softening edges at display scale.
+ */
+function boxBlur(src: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray<ArrayBuffer> {
+    const dst = new Uint8ClampedArray(new ArrayBuffer(src.length));
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            let r = 0, g = 0, b = 0, n = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                const ny = y + dy;
+                if (ny < 0 || ny >= h) continue;
+                for (let dx = -1; dx <= 1; dx++) {
+                    const nx = x + dx;
+                    if (nx < 0 || nx >= w) continue;
+                    const i = (ny * w + nx) * 4;
+                    r += src[i]; g += src[i + 1]; b += src[i + 2];
+                    n++;
+                }
+            }
+            const i = (y * w + x) * 4;
+            dst[i]     = r / n;
+            dst[i + 1] = g / n;
+            dst[i + 2] = b / n;
+            dst[i + 3] = 255;
+        }
+    }
+    return dst;
 }
 
 /** Compute the current world-space camera position from turntable state. */
@@ -373,7 +414,7 @@ async function startHighQualityRender(): Promise<void> {
     );
 
     for (let i = 0; i < HQ_SAMPLES && !hqCancelled; i++) {
-        render(w, h, i);
+        render(w, h, i, false);
         const pixels = await get_pixels(w, h);
         ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
         setStatus(`Rendering… ${i + 1} / ${HQ_SAMPLES} spp`);
