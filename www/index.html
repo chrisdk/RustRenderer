@@ -130,54 +130,6 @@
             margin: 4px 0;
         }
 
-        /* ── Speed widget ──────────────────────────────────────────────────── */
-
-        .widget-label {
-            font-size: 10px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.10em;
-            color: rgba(255,255,255,0.30);
-            padding: 6px 2px 4px;
-        }
-
-        #speed-row {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .speed-btn {
-            width: 28px;
-            height: 28px;
-            flex-shrink: 0;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.12);
-            border-radius: 5px;
-            color: #ccc;
-            font-size: 18px;
-            line-height: 1;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: background 0.12s;
-            padding: 0;
-        }
-        .speed-btn:hover    { background: rgba(255,255,255,0.14); color: #fff; }
-        .speed-btn:disabled { opacity: 0.25; cursor: default; }
-
-        #speed-display {
-            flex: 1;
-            text-align: center;
-            font-size: 13px;
-            color: rgba(255,255,255,0.75);
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 5px;
-            padding: 5px 4px;
-        }
-
         /* ── Load file ─────────────────────────────────────────────────────── */
 
         #load-btn {
@@ -207,8 +159,9 @@
             display: block;
             width: 100%;
             height: 100%;
-            cursor: crosshair;
+            cursor: grab;
         }
+        canvas.dragging { cursor: grabbing; }
 
         /* ── Controls hint (bottom-centre of canvas) ───────────────────────── */
 
@@ -270,17 +223,6 @@
 
         <div class="divider"></div>
 
-        <div id="speed-widget">
-            <div class="widget-label">Move Speed</div>
-            <div id="speed-row">
-                <button class="speed-btn" id="speed-down">−</button>
-                <span id="speed-display">1×</span>
-                <button class="speed-btn" id="speed-up">+</button>
-            </div>
-        </div>
-
-        <div class="divider"></div>
-
         <label id="load-btn" for="file-input">Load GLB / GLTF…</label>
         <input id="file-input" type="file" accept=".gltf,.glb">
     </div>
@@ -288,11 +230,7 @@
     <div id="canvas-wrap">
         <canvas id="canvas"></canvas>
 
-        <div id="hints">
-            Click to look around &nbsp;·&nbsp;
-            WASD / Space / Shift &nbsp;·&nbsp;
-            Esc to release
-        </div>
+        <div id="hints">Drag to spin</div>
 
         <div id="drop-overlay">Drop GLTF / GLB here</div>
     </div>
