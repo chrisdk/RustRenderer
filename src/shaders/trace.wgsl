@@ -560,7 +560,13 @@ fn apply_normal_map(
 
     let T = normalize(T4.xyz);
     // Bitangent = cross(N, T) * handedness. The sign flip corrects mirrored UVs.
-    let B = normalize(cross(smooth_normal, T)) * T4.w;
+    //
+    // Guard: if the stored tangent happens to be parallel to the normal (which
+    // shouldn't happen with well-formed GLTF tangents, but can with degenerate
+    // or hand-edited meshes), the cross product is zero and normalize(zero) = NaN.
+    let B_raw = cross(smooth_normal, T);
+    if dot(B_raw, B_raw) < 1e-6 { return smooth_normal; }
+    let B = normalize(B_raw) * T4.w;
 
     // TBN rotates tangent-space → world-space.
     return normalize(T * ts.x + B * ts.y + smooth_normal * ts.z);
@@ -700,8 +706,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let t0 = vec4(tri.t0x, tri.t0y, tri.t0z, tri.t0w);
         let t1 = vec4(tri.t1x, tri.t1y, tri.t1z, tri.t1w);
         let t2 = vec4(tri.t2x, tri.t2y, tri.t2z, tri.t2w);
+        // Interpolate tangent directions barycentrically.
+        //
+        // At UV seams, adjacent triangles belong to different UV islands and
+        // their per-vertex tangents can point in opposite directions. Naive
+        // barycentric interpolation across such a boundary produces a near-zero
+        // sum, and normalize(zero) = NaN. NaN in the accumulation buffer is
+        // permanent (NaN + x = NaN forever), so it must be stopped here.
+        //
+        // The fix: skip normalize when the interpolated tangent is too short.
+        // The zero tangent falls through to apply_normal_map's own "no tangent
+        // data" guard (dot < 0.01), which returns smooth_normal unchanged.
+        let tangent_raw = bary_w * t0.xyz + hit.u * t1.xyz + hit.v * t2.xyz;
         let tangent = vec4(
-            normalize(bary_w * t0.xyz + hit.u * t1.xyz + hit.v * t2.xyz),
+            select(vec3(0.0), normalize(tangent_raw), dot(tangent_raw, tangent_raw) > 1e-6),
             t0.w,
         );
         let shading_n = apply_normal_map(mat.normal_tex, uv, smooth_n, tangent);
@@ -919,6 +937,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if sample_lum > FIREFLY_CLAMP {
         radiance *= FIREFLY_CLAMP / sample_lum;
     }
+
+    // ── NaN sanitisation ─────────────────────────────────────────────────────
+    //
+    // NaN in the accumulation buffer is permanent: NaN + anything = NaN, so
+    // one bad sample locks the pixel black forever. IEEE 754 guarantees that
+    // NaN != NaN is true, so this catches any component that went NaN (from
+    // degenerate geometry or numerical edge cases) and treats it as black
+    // (contributes nothing to the running average) rather than corrupting the
+    // pixel permanently.
+    if any(radiance != radiance) { radiance = vec3(0.0); }
 
     // ── Progressive accumulation ──────────────────────────────────────────────
     let sample = vec4<f32>(radiance, 1.0);
