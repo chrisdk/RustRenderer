@@ -108,7 +108,7 @@ function applyAutoCamera(): void {
     turntable.elevation = 0.25;
 
     const dx = b[3] - b[0], dy = b[4] - b[1], dz = b[5] - b[2];
-    turntable.radius = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz) * 0.75, 0.1);
+    turntable.radius = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz) * 1.0, 0.1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,11 +137,10 @@ canvas.addEventListener('pointermove', e => {
     lastX = e.clientX;
     lastY = e.clientY;
 
-    // Turntable convention: right-drag reveals the right face of the object.
-    turntable.azimuth   += dx * DRAG_SPEED;
+    turntable.azimuth   -= dx * DRAG_SPEED;
     turntable.elevation  = Math.max(-EL_MAX,
                            Math.min( EL_MAX,
-                           turntable.elevation - dy * DRAG_SPEED));
+                           turntable.elevation + dy * DRAG_SPEED));
 
     applyTurntable();
 });
