@@ -182,3 +182,125 @@ pub fn decode_hdr(bytes: &[u8]) -> Result<HdrImage, String> {
 
     Ok(HdrImage { width, height, pixels })
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Builds a minimal well-formed HDR header for a given image size.
+    ///
+    /// The header ends with a blank line followed by the resolution string, as
+    /// required by the Radiance format. Pixels follow immediately after.
+    fn hdr_header(width: u32, height: u32) -> Vec<u8> {
+        let mut h = Vec::new();
+        h.extend_from_slice(b"#?RADIANCE\n");
+        h.extend_from_slice(b"FORMAT=32-bit_rle_rgbe\n");
+        h.extend_from_slice(b"\n");                              // blank line = end of header
+        h.extend_from_slice(format!("-Y {height} +X {width}\n").as_bytes());
+        h
+    }
+
+    /// Constructs a 1×1 uncompressed HDR containing a single RGBE pixel.
+    ///
+    /// Because the first two bytes of the pixel data are not [2, 2], the decoder
+    /// takes the uncompressed branch (width=1 means scanline_width ≠ 1 anyway).
+    fn single_pixel_hdr(rgbe: [u8; 4]) -> Vec<u8> {
+        let mut data = hdr_header(1, 1);
+        data.extend_from_slice(&rgbe);
+        data
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    /// A zero exponent byte means "this pixel is black" — the formula
+    /// `mantissa × 2^(E−128)` is not evaluated, avoiding 0 × 2^−128.
+    #[test]
+    fn test_decode_hdr_black_pixel() {
+        let hdr = single_pixel_hdr([0, 0, 0, 0]);
+        let img = decode_hdr(&hdr).expect("should decode without error");
+        assert_eq!(img.width,  1);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.pixels.len(), 4,  "one pixel = 4 f32s (R, G, B, padding)");
+        assert_eq!(img.pixels[0], 0.0,  "R should be 0");
+        assert_eq!(img.pixels[1], 0.0,  "G should be 0");
+        assert_eq!(img.pixels[2], 0.0,  "B should be 0");
+        assert_eq!(img.pixels[3], 1.0,  "padding channel is always 1.0");
+    }
+
+    /// RGBE pixel [128, 0, 0, 129]:
+    ///   scale = 2^(129−128) / 256 = 2/256 = 1/128
+    ///   R = 128 × (1/128) = 1.0, G = 0.0, B = 0.0
+    #[test]
+    fn test_decode_hdr_uncompressed_red() {
+        let hdr = single_pixel_hdr([128, 0, 0, 129]);
+        let img = decode_hdr(&hdr).expect("should decode");
+        let eps = 1e-5f32;
+        assert!((img.pixels[0] - 1.0).abs() < eps, "R expected 1.0, got {}", img.pixels[0]);
+        assert!((img.pixels[1] -  0.0).abs() < eps, "G expected 0.0, got {}", img.pixels[1]);
+        assert!((img.pixels[2] -  0.0).abs() < eps, "B expected 0.0, got {}", img.pixels[2]);
+    }
+
+    /// RGBE pixel [128, 64, 32, 129]:
+    ///   scale = 1/128
+    ///   R = 128/128 = 1.0, G = 64/128 = 0.5, B = 32/128 = 0.25
+    #[test]
+    fn test_decode_hdr_uncompressed_mixed_channels() {
+        let hdr = single_pixel_hdr([128, 64, 32, 129]);
+        let img = decode_hdr(&hdr).expect("should decode");
+        let eps = 1e-5f32;
+        assert!((img.pixels[0] - 1.00).abs() < eps, "R expected 1.00, got {}", img.pixels[0]);
+        assert!((img.pixels[1] - 0.50).abs() < eps, "G expected 0.50, got {}", img.pixels[1]);
+        assert!((img.pixels[2] - 0.25).abs() < eps, "B expected 0.25, got {}", img.pixels[2]);
+    }
+
+    /// New-RLE scanline: magic bytes [2, 2, 0, 2] signal a 2-pixel-wide RLE row.
+    /// Each channel is encoded as a run of 2 identical bytes:
+    ///   code 130 (> 128) → run of 130−128 = 2 repetitions of the following byte.
+    /// Both pixels decode to RGBE [128, 64, 32, 129] = (1.0, 0.5, 0.25, 1.0).
+    #[test]
+    fn test_decode_hdr_new_rle_scanline() {
+        let mut hdr = hdr_header(2, 1);
+        // New-RLE magic header for a 2-pixel-wide scanline.
+        hdr.extend_from_slice(&[2, 2, 0, 2]);
+        // Four channel runs, each: [130=run-of-2, value].
+        hdr.extend_from_slice(&[130, 128]);   // R channel: 128, 128
+        hdr.extend_from_slice(&[130,  64]);   // G channel: 64, 64
+        hdr.extend_from_slice(&[130,  32]);   // B channel: 32, 32
+        hdr.extend_from_slice(&[130, 129]);   // E channel: 129, 129
+
+        let img = decode_hdr(&hdr).expect("should decode RLE");
+        assert_eq!(img.width,  2);
+        assert_eq!(img.height, 1);
+        assert_eq!(img.pixels.len(), 8, "2 pixels × 4 f32s = 8");
+
+        let eps = 1e-5f32;
+        for px in 0..2 {
+            let base = px * 4;
+            assert!((img.pixels[base    ] - 1.00).abs() < eps, "px{px} R");
+            assert!((img.pixels[base + 1] - 0.50).abs() < eps, "px{px} G");
+            assert!((img.pixels[base + 2] - 0.25).abs() < eps, "px{px} B");
+            assert_eq!(img.pixels[base + 3], 1.0,                "px{px} padding");
+        }
+    }
+
+    /// A file truncated before the resolution string should return a clear error,
+    /// not panic or produce garbage output.
+    #[test]
+    fn test_decode_hdr_truncated_returns_error() {
+        let result = decode_hdr(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n");
+        assert!(result.is_err(), "truncated file should return Err");
+    }
+
+    /// Completely invalid bytes should return an error rather than panicking.
+    #[test]
+    fn test_decode_hdr_garbage_returns_error() {
+        let result = decode_hdr(b"this is not an HDR file");
+        assert!(result.is_err());
+    }
+}

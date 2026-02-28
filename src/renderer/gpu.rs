@@ -628,3 +628,45 @@ impl Renderer {
         pixels
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+    use std::mem::{offset_of, size_of};
+
+    /// `FrameUniforms` is uploaded verbatim to a GPU uniform buffer every frame.
+    /// The WGSL `FrameUniforms` struct must match byte-for-byte. If a field is
+    /// added, removed, or reordered on either side without updating the other,
+    /// the shader will silently read garbage for every frame constant — wrong
+    /// output size, wrong sample index, wrong flags, broken IBL switch.
+    #[test]
+    fn test_frame_uniforms_gpu_layout() {
+        assert_eq!(size_of::<FrameUniforms>(), 32,
+            "FrameUniforms must be 32 bytes (two 16-byte vec4 rows in WGSL)");
+        assert_eq!(offset_of!(FrameUniforms, width),        0);
+        assert_eq!(offset_of!(FrameUniforms, height),       4);
+        assert_eq!(offset_of!(FrameUniforms, sample_index), 8);
+        assert_eq!(offset_of!(FrameUniforms, flags),        12);
+        assert_eq!(offset_of!(FrameUniforms, env_width),    16);
+        assert_eq!(offset_of!(FrameUniforms, env_height),   20);
+        // Padding fields exist; just verify they're present and Pod is satisfied.
+        let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());
+    }
+
+    /// `GpuTextureInfo` entries are stored in a storage buffer indexed by
+    /// material texture slots. The WGSL `TexInfo` struct must match exactly.
+    #[test]
+    fn test_gpu_texture_info_layout() {
+        assert_eq!(size_of::<GpuTextureInfo>(), 16,
+            "GpuTextureInfo must be 16 bytes (multiple of 16 for WGSL storage arrays)");
+        assert_eq!(offset_of!(GpuTextureInfo, offset), 0);
+        assert_eq!(offset_of!(GpuTextureInfo, width),  4);
+        assert_eq!(offset_of!(GpuTextureInfo, height), 8);
+        let _: &[u8] = bytemuck::bytes_of(&GpuTextureInfo::zeroed());
+    }
+}

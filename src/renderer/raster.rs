@@ -689,3 +689,42 @@ fn aligned_bytes_per_row(width: u32) -> u32 {
     let tight = width * 4;  // 4 bytes per RGBA8 pixel
     (tight + ALIGN - 1) & !(ALIGN - 1)
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+    use std::mem::{offset_of, size_of};
+
+    /// `GpuInstance` is packed into a storage buffer read by the vertex shader.
+    /// The WGSL `InstanceData` struct must match byte-for-byte. A silent drift
+    /// here means every instance will use the wrong transform or material.
+    #[test]
+    fn test_gpu_instance_layout() {
+        assert_eq!(size_of::<GpuInstance>(), 80,
+            "GpuInstance must be 80 bytes (multiple of 16 for WGSL storage arrays)");
+        assert_eq!(offset_of!(GpuInstance, transform),  0,
+            "transform matrix starts at byte 0");
+        assert_eq!(offset_of!(GpuInstance, mat_index), 64,
+            "mat_index immediately follows the 64-byte matrix");
+        let _: &[u8] = bytemuck::bytes_of(&GpuInstance::zeroed());
+    }
+
+    /// `GpuTexInfo` has an identical layout requirement to `GpuTextureInfo` in
+    /// `gpu.rs` — both must match the single `TexInfo` struct defined in the
+    /// WGSL shaders. If these diverge, texture sampling silently reads the wrong
+    /// pixels from the packed texture buffer.
+    #[test]
+    fn test_gpu_tex_info_layout() {
+        assert_eq!(size_of::<GpuTexInfo>(), 16,
+            "GpuTexInfo must be 16 bytes (multiple of 16 for WGSL storage arrays)");
+        assert_eq!(offset_of!(GpuTexInfo, offset), 0);
+        assert_eq!(offset_of!(GpuTexInfo, width),  4);
+        assert_eq!(offset_of!(GpuTexInfo, height), 8);
+        let _: &[u8] = bytemuck::bytes_of(&GpuTexInfo::zeroed());
+    }
+}

@@ -294,6 +294,146 @@ impl Scene {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Minimal GLB builder ───────────────────────────────────────────────────
+
+    /// Constructs a minimal valid GLB binary containing one triangle.
+    ///
+    /// The triangle has three vertices at (0,0,0), (1,0,0), and (0,1,0) and is
+    /// placed at the world origin with an identity transform. No materials are
+    /// defined — the loader should inject the default material automatically.
+    ///
+    /// This is the smallest possible GLB that exercises every code path in
+    /// `from_gltf`: header parsing, accessor/bufferView resolution, geometry
+    /// flattening, scene-graph traversal, and default-material injection.
+    fn minimal_triangle_glb() -> Vec<u8> {
+        // ── Binary chunk: 3 × VEC3 f32 positions (36 bytes)
+        //                + 3 × u16 indices            (6 bytes)
+        //                + 2 bytes padding             (→ 44 total, aligned to 4)
+        let mut bin: Vec<u8> = Vec::new();
+        for pos in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for f in pos { bin.extend_from_slice(&f.to_le_bytes()); }
+        }
+        for idx in [0u16, 1, 2] { bin.extend_from_slice(&idx.to_le_bytes()); }
+        while bin.len() % 4 != 0 { bin.push(0); }   // pad to 4-byte boundary
+        let bin_len = bin.len();                      // 44 bytes
+
+        // ── JSON chunk: minimal GLTF referencing the binary above.
+        // componentType 5126 = FLOAT, 5123 = UNSIGNED_SHORT
+        // The gltf crate's validator requires min/max on POSITION accessors.
+        // Our three vertices span [0,0,0]..[1,1,0].
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],"buffers":[{"byteLength":42}]}"#;
+        let json_bytes   = json.as_bytes();
+        let json_padded  = (json_bytes.len() + 3) & !3;   // round up to 4 bytes
+
+        // Total file length: 12-byte header + 8-byte JSON chunk header + padded JSON
+        //                  + 8-byte BIN chunk header + binary data
+        let total = 12 + 8 + json_padded + 8 + bin_len;
+
+        let mut glb = Vec::with_capacity(total);
+
+        // GLB header
+        glb.extend_from_slice(b"glTF");                         // magic
+        glb.extend_from_slice(&2u32.to_le_bytes());             // version 2
+        glb.extend_from_slice(&(total as u32).to_le_bytes());   // total length
+
+        // JSON chunk
+        glb.extend_from_slice(&(json_padded as u32).to_le_bytes()); // chunkLength
+        glb.extend_from_slice(b"JSON");                              // chunkType
+        glb.extend_from_slice(json_bytes);
+        while glb.len() % 4 != 0 { glb.push(b' '); }   // pad JSON with spaces
+
+        // BIN chunk
+        glb.extend_from_slice(&(bin_len as u32).to_le_bytes()); // chunkLength
+        glb.extend_from_slice(b"BIN\0");                        // chunkType
+        glb.extend_from_slice(&bin);
+
+        glb
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
+
+    /// The most basic sanity check: a well-formed single-triangle GLB loads
+    /// without error and produces the expected vertex, index, mesh, and instance
+    /// counts. If this fails, the scene loader is fundamentally broken.
+    #[test]
+    fn test_from_gltf_single_triangle_loads() {
+        let glb   = minimal_triangle_glb();
+        let scene = Scene::from_gltf(&glb)
+            .expect("minimal single-triangle GLB should parse without error");
+
+        assert_eq!(scene.vertices.len(),  3, "expected 3 vertices");
+        assert_eq!(scene.indices.len(),   3, "expected 3 indices");
+        assert_eq!(scene.meshes.len(),    1, "expected 1 mesh");
+        assert_eq!(scene.instances.len(), 1, "expected 1 instance");
+
+        // The mesh window covers all 3 indices starting at offset 0.
+        assert_eq!(scene.meshes[0].first_index,  0);
+        assert_eq!(scene.meshes[0].index_count,  3);
+    }
+
+    /// Vertex positions must round-trip: what was uploaded as f32 floats in the
+    /// binary chunk should appear unchanged in `scene.vertices[*].position`.
+    #[test]
+    fn test_from_gltf_vertex_positions_round_trip() {
+        let scene = Scene::from_gltf(&minimal_triangle_glb())
+            .expect("should parse");
+
+        let eps = 1e-6f32;
+        let p = [
+            scene.vertices[0].position,
+            scene.vertices[1].position,
+            scene.vertices[2].position,
+        ];
+        assert!((p[0][0]).abs() < eps && (p[0][1]).abs() < eps && (p[0][2]).abs() < eps,
+            "v0 should be (0,0,0), got {:?}", p[0]);
+        assert!((p[1][0] - 1.0).abs() < eps && (p[1][1]).abs() < eps && (p[1][2]).abs() < eps,
+            "v1 should be (1,0,0), got {:?}", p[1]);
+        assert!((p[2][0]).abs() < eps && (p[2][1] - 1.0).abs() < eps && (p[2][2]).abs() < eps,
+            "v2 should be (0,1,0), got {:?}", p[2]);
+    }
+
+    /// When no material is specified in the GLTF, `from_gltf` must inject the
+    /// default material (white, non-metallic, no textures). The instance's
+    /// material index must point to it, and the transform must be identity.
+    #[test]
+    fn test_from_gltf_default_material_and_identity_transform() {
+        let scene = Scene::from_gltf(&minimal_triangle_glb())
+            .expect("should parse");
+
+        // Default material injected because no materials are defined in the file.
+        assert_eq!(scene.materials.len(), 1, "one default material expected");
+        assert_eq!(scene.materials[0].albedo, [1.0, 1.0, 1.0, 1.0],
+            "default material albedo should be white");
+        assert_eq!(scene.materials[0].metallic,  0.0);
+        assert_eq!(scene.materials[0].roughness, 0.5);
+
+        // Node has no explicit transform — should default to identity.
+        let identity: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert_eq!(scene.instances[0].transform, identity,
+            "instance with no transform should use the identity matrix");
+    }
+
+    /// Garbage bytes should return a clear error, not panic.
+    #[test]
+    fn test_from_gltf_garbage_returns_error() {
+        let result = Scene::from_gltf(b"not a valid gltf file!!");
+        assert!(result.is_err(), "garbage bytes should return Err, not panic");
+    }
+}
+
 /// Recursively walks a GLTF node and its children, emitting a MeshInstance
 /// for every node that references a mesh.
 ///

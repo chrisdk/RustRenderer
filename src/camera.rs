@@ -638,4 +638,110 @@ mod tests {
             "downward pitch should be clamped to −MAX_PITCH ({MAX_PITCH}), got {}", cam.pitch,
         );
     }
+
+    // ── Raster camera matrix math ─────────────────────────────────────────────
+
+    /// Multiply a column-major 4×4 matrix by a homogeneous point [x, y, z, 1].
+    /// Returns the transformed [x, y, z] (w division omitted — view matrices
+    /// never scale w, so w is always 1.0 after a rigid-body view transform).
+    fn view_transform(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
+        let w = [p[0], p[1], p[2], 1.0f32];
+        [
+            m[0][0]*w[0] + m[1][0]*w[1] + m[2][0]*w[2] + m[3][0]*w[3],
+            m[0][1]*w[0] + m[1][1]*w[1] + m[2][1]*w[2] + m[3][1]*w[3],
+            m[0][2]*w[0] + m[1][2]*w[1] + m[2][2]*w[2] + m[3][2]*w[3],
+        ]
+    }
+
+    /// Apply the projection matrix to a point on the camera Z axis (x=y=0) and
+    /// return the resulting NDC z value (z_clip / w_clip).
+    fn proj_ndc_z(proj: &[[f32; 4]; 4], cam_z: f32) -> f32 {
+        // col-major: z_clip = proj[2][2]*cam_z + proj[3][2]
+        //            w_clip = proj[2][3]*cam_z + proj[3][3]
+        let z_clip = proj[2][2] * cam_z + proj[3][2];
+        let w_clip = proj[2][3] * cam_z + proj[3][3];
+        z_clip / w_clip
+    }
+
+    /// A camera at (0, 0, 5) looking toward the origin: the world origin should
+    /// appear at camera-space z = −5 after applying the view matrix.
+    ///
+    /// This verifies that the view matrix correctly encodes the camera position
+    /// and that world→camera-space transforms produce sensible depth values.
+    #[test]
+    fn test_raster_view_transforms_world_point() {
+        let cam = Camera::new([0.0, 0.0, 5.0], FRAC_PI_2, 1.0);
+        let u   = cam.to_raster_uniform();
+
+        // World origin is 5 units in front of the camera (along −Z).
+        // In camera space that maps to z = −5 (negative = in front).
+        let cam_space = view_transform(&u.view, [0.0, 0.0, 0.0]);
+        assert!(approx_eq(cam_space[0],  0.0), "x should be 0, got {}", cam_space[0]);
+        assert!(approx_eq(cam_space[1],  0.0), "y should be 0, got {}", cam_space[1]);
+        assert!(approx_eq(cam_space[2], -5.0), "z should be −5, got {}", cam_space[2]);
+    }
+
+    /// A camera at (3, 1, 0), looking along −Z (default orientation).
+    /// A point directly ahead at (3, 1, −7) should transform to (0, 0, −7)
+    /// in camera space — the lateral offsets cancel out.
+    #[test]
+    fn test_raster_view_offsets_cancel() {
+        let cam = Camera::new([3.0, 1.0, 0.0], FRAC_PI_2, 1.0);
+        let u   = cam.to_raster_uniform();
+
+        let cam_space = view_transform(&u.view, [3.0, 1.0, -7.0]);
+        assert!(approx_eq(cam_space[0],  0.0), "x should cancel to 0, got {}", cam_space[0]);
+        assert!(approx_eq(cam_space[1],  0.0), "y should cancel to 0, got {}", cam_space[1]);
+        assert!(approx_eq(cam_space[2], -7.0), "z should be −7, got {}",       cam_space[2]);
+    }
+
+    /// WebGPU NDC depth range is [0, 1] (not OpenGL's [−1, 1]).
+    /// The near plane must map to NDC z = 0 and the far plane to NDC z = 1.
+    ///
+    /// If this fails the depth buffer will have the wrong range and distant
+    /// objects will be clipped or z-fight with near ones.
+    #[test]
+    fn test_raster_proj_near_far_depth_mapping() {
+        let cam  = Camera::new([0.0, 0.0, 0.0], FRAC_PI_2, 1.0);
+        let u    = cam.to_raster_uniform();
+        let near = 0.01_f32;
+        let far  = 1000.0_f32;
+
+        let ndc_near = proj_ndc_z(&u.proj, -near);
+        let ndc_far  = proj_ndc_z(&u.proj, -far);
+
+        assert!(approx_eq(ndc_near, 0.0), "near plane → NDC z=0, got {ndc_near}");
+        assert!(approx_eq(ndc_far,  1.0), "far plane  → NDC z=1, got {ndc_far}");
+    }
+
+    /// The projection matrix must encode the viewport aspect ratio correctly:
+    /// the ratio of vertical to horizontal scale equals the aspect ratio.
+    /// A wrong aspect ratio stretches or squishes the rendered geometry.
+    #[test]
+    fn test_raster_proj_encodes_aspect_ratio() {
+        let aspect = 16.0_f32 / 9.0;
+        let cam    = Camera::new([0.0, 0.0, 0.0], FRAC_PI_2, aspect);
+        let u      = cam.to_raster_uniform();
+
+        // proj[1][1] = 1/tan(vfov/2)
+        // proj[0][0] = 1/(aspect × tan(vfov/2))
+        // Ratio should equal aspect.
+        let ratio = u.proj[1][1] / u.proj[0][0];
+        assert!(
+            (ratio - aspect).abs() < 1e-4,
+            "proj[1][1]/proj[0][0] should equal aspect {aspect}, got {ratio}"
+        );
+    }
+
+    /// The `cam_pos` field of `RasterCameraUniform` must equal the camera's
+    /// world-space position so the fragment shader can compute view directions.
+    #[test]
+    fn test_raster_cam_pos_passthrough() {
+        let pos = [4.2_f32, -1.1, 3.3];
+        let cam = Camera::new(pos, FRAC_PI_2, 1.0);
+        let u   = cam.to_raster_uniform();
+        assert!(approx_eq(u.cam_pos[0], pos[0]), "cam_pos.x");
+        assert!(approx_eq(u.cam_pos[1], pos[1]), "cam_pos.y");
+        assert!(approx_eq(u.cam_pos[2], pos[2]), "cam_pos.z");
+    }
 }
