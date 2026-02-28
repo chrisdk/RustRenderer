@@ -14,7 +14,8 @@
 //! 1. `init_renderer()` — set up logging, select a GPU adapter, open a device.
 //! 2. `load_scene(bytes)` — parse GLTF, build the BVH, upload to the GPU.
 //! 3. `update_camera(...)` — update the camera uniform and upload it.
-//! 4. `render()` — dispatch the compute shader (Phase 3).
+//! 4. `render()` — dispatch the path-trace compute shader (high quality).
+//! 5. `raster_frame()` — draw the rasterising preview (fast, interactive).
 
 // On wasm32 the prelude brings #[wasm_bindgen] and JsValue into scope.
 // On native this line is compiled away entirely.
@@ -32,13 +33,15 @@ pub mod scene;
 
 /// Everything the WASM module keeps alive for the lifetime of the page.
 ///
-/// A single `Renderer` (GPU device + buffers) and a `Camera` (current viewpoint)
-/// live here. They are created by `init_renderer` and mutated by the other API
-/// functions. Thread-local because WASM runs in a single JS thread; `RefCell`
-/// gives safe interior mutability without needing a `Mutex`.
+/// A single `Renderer` (GPU device + path-tracing buffers), a `RasterRenderer`
+/// (GPU raster preview pipeline), and a `Camera` (current viewpoint) live here.
+/// They are created by `init_renderer` and mutated by the other API functions.
+/// Thread-local because WASM runs in a single JS thread; `RefCell` gives safe
+/// interior mutability without needing a `Mutex`.
 #[cfg(target_arch = "wasm32")]
 struct AppState {
     renderer: renderer::Renderer,
+    raster:   renderer::RasterRenderer,
     camera:   camera::Camera,
     /// World-space AABB of the currently loaded scene (min corner, max corner).
     /// Set by `load_scene`; used by `get_scene_bounds` so the frontend can
@@ -85,7 +88,16 @@ pub async fn init_renderer() -> Result<(), JsValue> {
         16.0 / 9.0,
     );
 
-    STATE.with(|s| *s.borrow_mut() = Some(AppState { renderer, camera, scene_bounds: None }));
+    // The raster renderer shares the same GPU device/queue as the path tracer.
+    // It holds its own pipeline and buffers but borrows device/queue at each call.
+    let raster = renderer::RasterRenderer::new();
+
+    STATE.with(|s| *s.borrow_mut() = Some(AppState {
+        renderer,
+        raster,
+        camera,
+        scene_bounds: None,
+    }));
 
     log::info!("renderer ready");
     Ok(())
@@ -118,7 +130,18 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
         let bounds = bvh.nodes.first()
             .map(|root| (root.aabb_min, root.aabb_max));
 
+        // Upload to path-tracer (BVH + materials + textures).
         state.renderer.upload_scene(&bvh, &scene.materials, &scene.textures);
+
+        // Upload to rasteriser (vertex/index geometry + instance transforms).
+        // Borrows device/queue from the path-tracer renderer — they share the
+        // same underlying GPU device.
+        state.raster.upload_scene(
+            &state.renderer.device,
+            &state.renderer.queue,
+            &scene,
+        );
+
         state.scene_bounds = bounds;
         log::info!("scene loaded");
         Ok(())
@@ -148,7 +171,7 @@ pub fn get_scene_bounds() -> js_sys::Float32Array {
 }
 
 /// Sets the camera position and orientation and uploads the new uniform to
-/// the GPU.
+/// the GPU (both path-tracer and raster pipelines).
 ///
 /// - `px / py / pz` — world-space position
 /// - `yaw`   — horizontal rotation in radians (0 = looking along −Z)
@@ -173,8 +196,17 @@ pub fn update_camera(
             state.camera.vfov     = vfov;
             state.camera.aspect   = aspect;
 
-            let uniform = state.camera.to_uniform();
-            state.renderer.upload_camera(&uniform);
+            // Path-tracer camera (ray-generation basis vectors).
+            let pt_uniform = state.camera.to_uniform();
+            state.renderer.upload_camera(&pt_uniform);
+
+            // Raster camera (view + projection matrices).
+            let rs_uniform = state.camera.to_raster_uniform();
+            state.raster.upload_camera(
+                &state.renderer.device,
+                &state.renderer.queue,
+                &rs_uniform,
+            );
         }
     });
 }
@@ -221,15 +253,9 @@ pub fn render(width: u32, height: u32, sample_index: u32, preview: bool) {
 #[wasm_bindgen]
 pub async fn get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
     let pixels = STATE.with(|s| {
-        // We need a reference to the renderer outside the RefCell borrow.
-        // SAFETY: We take the renderer out of the Option temporarily via a
-        // raw pointer — but we only hold it for the synchronous setup portion
-        // (creating the staging buffer and submitting the copy command).
-        // The async await happens after the borrow is released.
         s.borrow()
             .as_ref()
             .map(|state| {
-                // Capture the raw pointer; we'll re-borrow through it below.
                 &state.renderer as *const renderer::Renderer
             })
     });
@@ -243,5 +269,72 @@ pub async fn get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
     // single-threaded, so no concurrent access is possible.
     let renderer = unsafe { &*renderer_ptr };
     let bytes = renderer.get_pixels(width, height).await;
+    js_sys::Uint8Array::from(bytes.as_slice())
+}
+
+/// Draws the scene using the fast rasterising preview pipeline.
+///
+/// This runs at 60 fps during interactive dragging. Unlike the path tracer
+/// (`render`), it produces a single fully-formed frame with no progressive
+/// accumulation — call `raster_get_pixels` immediately after to retrieve it.
+///
+/// Requires both `init_renderer` and `load_scene` to have been called first.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn raster_frame(width: u32, height: u32) {
+    let ready = STATE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map_or(false, |s| s.raster.is_scene_loaded())
+    });
+
+    if !ready {
+        log::warn!("raster_frame() called before scene is loaded — ignoring");
+        return;
+    }
+
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            // render_frame takes device+queue as parameters; borrow them
+            // from the path-tracer renderer (same GPU device).
+            state.raster.render_frame(
+                &state.renderer.device,
+                &state.renderer.queue,
+                width,
+                height,
+            );
+        }
+    });
+}
+
+/// Reads the last rasterised frame back from the GPU and returns it as a
+/// `Uint8Array` of raw RGBA8 bytes.
+///
+/// Must be called immediately after `raster_frame()`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn raster_get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
+    // Capture raw pointers before the async boundary so we can hold references
+    // across the `.await` without fighting the borrow checker.
+    let ptrs = STATE.with(|s| {
+        s.borrow().as_ref().map(|state| (
+            &state.raster           as *const renderer::RasterRenderer,
+            &state.renderer.device  as *const wgpu::Device,
+            &state.renderer.queue   as *const wgpu::Queue,
+        ))
+    });
+
+    let Some((raster_ptr, device_ptr, queue_ptr)) = ptrs else {
+        return js_sys::Uint8Array::new_with_length(0);
+    };
+
+    // SAFETY: All three objects live in STATE (thread_local). WASM is
+    // single-threaded, so no concurrent mutation occurs, and none of these
+    // are mutated by get_pixels (it takes &self / shared references).
+    let raster = unsafe { &*raster_ptr };
+    let device = unsafe { &*device_ptr };
+    let queue  = unsafe { &*queue_ptr };
+
+    let bytes = raster.get_pixels(device, queue, width, height).await;
     js_sys::Uint8Array::from(bytes.as_slice())
 }

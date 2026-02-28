@@ -60,6 +60,46 @@ pub struct CameraUniform {
 }
 
 // ============================================================================
+// RasterCameraUniform — matrices for the rasterizer pipeline
+// ============================================================================
+
+/// A GPU-ready camera uniform for the rasterizing preview renderer.
+///
+/// The path-tracer uses ray generation (origin + film-plane vectors); the
+/// rasterizer uses the classical view-projection matrix pair. Both describe
+/// the same camera — just different math on the same yaw/pitch/position state.
+///
+/// Layout: 144 bytes — two 4×4 matrices (128 B) + world position (12 B) + 4 B pad.
+///
+/// The WGSL vertex shader computes clip position as:
+/// ```wgsl
+/// let clip_pos = proj * view * model * vec4<f32>(position, 1.0);
+/// ```
+/// The fragment shader needs the world-space camera position to compute the
+/// view direction for specular highlights — it's cheaper to pass it explicitly
+/// than to recover it from the view matrix inverse.
+///
+/// WGSL binding: `@group(0) @binding(0) var<uniform> cam: RasterCamera`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RasterCameraUniform {
+    /// View matrix: transforms world space → camera space.
+    /// Column-major, so `view[col][row]` matches WGSL's `mat4x4` layout.
+    pub view: [[f32; 4]; 4],
+
+    /// Projection matrix: transforms camera space → clip space.
+    /// Standard perspective projection (right-handed, WebGPU NDC z ∈ [0, 1]).
+    pub proj: [[f32; 4]; 4],
+
+    /// Camera position in world space, for view-direction computation in the
+    /// fragment shader. Followed by a padding float to reach 144 bytes
+    /// (the `vec3<f32>` in WGSL has 16-byte alignment, so the 4-byte pad
+    /// keeps the struct a multiple of 16 bytes).
+    pub cam_pos: [f32; 3],
+    pub _pad: f32,
+}
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -221,6 +261,71 @@ impl Camera {
             up_scaled:  [up[0] * half_h, up[1] * half_h, up[2] * half_h],
             _pad3:      0.0,
         }
+    }
+
+    /// Produces a [`RasterCameraUniform`] for the rasterizing preview pipeline.
+    ///
+    /// Builds the classical view + projection matrix pair from the same
+    /// yaw/pitch/position state used by `to_uniform()`. The path tracer and
+    /// rasterizer always stay in sync because they both derive from the same
+    /// Camera fields.
+    ///
+    /// The view matrix is the inverse of the camera-to-world transform.
+    /// Because the basis is orthonormal, the inverse is cheap: transpose the
+    /// 3×3 rotation block and negate the translation by dotting.
+    ///
+    /// The projection uses WebGPU NDC convention: x,y ∈ [−1, 1], z ∈ [0, 1].
+    pub fn to_raster_uniform(&self) -> RasterCameraUniform {
+        let (fwd, rgt, up) = self.basis();
+        let pos = self.position;
+
+        // ---- View matrix (world → camera space) ----
+        //
+        // For an orthonormal frame {rgt, up, −fwd}, the inverse is the
+        // transpose of the rotation block plus a negated-dot-product
+        // translation. Stored column-major: m[col][row].
+        //
+        //   Row 0 (right):    [ rgt.x  rgt.y  rgt.z  −(rgt · pos) ]
+        //   Row 1 (up):       [  up.x   up.y   up.z  −( up · pos) ]
+        //   Row 2 (−forward): [−fwd.x −fwd.y −fwd.z  +(fwd · pos) ]
+        //   Row 3:            [     0      0      0              1 ]
+        let view = [
+            [rgt[0],  up[0],  -fwd[0], 0.0],  // column 0
+            [rgt[1],  up[1],  -fwd[1], 0.0],  // column 1
+            [rgt[2],  up[2],  -fwd[2], 0.0],  // column 2
+            [                                  // column 3 (translation)
+                -(rgt[0]*pos[0] + rgt[1]*pos[1] + rgt[2]*pos[2]),
+                -( up[0]*pos[0] +  up[1]*pos[1] +  up[2]*pos[2]),
+                  fwd[0]*pos[0] + fwd[1]*pos[1] + fwd[2]*pos[2],
+                1.0,
+            ],
+        ];
+
+        // ---- Projection matrix (camera → clip space) ----
+        //
+        // Standard right-handed perspective, WebGPU NDC (z ∈ [0, 1]).
+        // Camera looks along −Z, so the near plane is at z = −near.
+        //
+        //   | 1/(a·h)    0         0           0        |
+        //   |    0      1/h        0           0        |
+        //   |    0       0      −f/(f−n)  −f·n/(f−n)   |
+        //   |    0       0        −1           0        |
+        //
+        // where h = tan(vfov/2),  a = aspect,  n = near,  f = far.
+        let near: f32 = 0.01;
+        let far:  f32 = 1000.0;
+        let inv_h = 1.0 / (self.vfov * 0.5).tan();  // 1 / tan(vfov/2)
+        let inv_w = inv_h / self.aspect;             // 1 / (aspect · tan(vfov/2))
+        let range = far / (far - near);              // f / (f − n)
+
+        let proj = [
+            [inv_w, 0.0,    0.0,        0.0],  // column 0
+            [0.0,   inv_h,  0.0,        0.0],  // column 1
+            [0.0,   0.0,   -range,     -1.0],  // column 2
+            [0.0,   0.0,   -range * near, 0.0], // column 3
+        ];
+
+        RasterCameraUniform { view, proj, cam_pos: self.position, _pad: 0.0 }
     }
 
     /// Returns the camera's three orthonormal basis vectors: (forward, right, up).
@@ -476,6 +581,28 @@ mod tests {
     #[test]
     fn test_camera_uniform_layout() {
         assert_eq!(std::mem::size_of::<CameraUniform>(), 64);
+    }
+
+    /// RasterCameraUniform must be exactly 144 bytes: two 4×4 matrices (128 B)
+    /// plus world-position vec3 + pad (16 B).
+    #[test]
+    fn test_raster_camera_uniform_layout() {
+        assert_eq!(std::mem::size_of::<RasterCameraUniform>(), 144);
+    }
+
+    /// At the default orientation (yaw=0, pitch=0), the view matrix column 2
+    /// should encode the −forward direction, which is +Z (since fwd = −Z).
+    /// This confirms the view matrix is oriented correctly.
+    #[test]
+    fn test_raster_uniform_view_matrix_default() {
+        let cam = Camera::new([0.0, 0.0, 0.0], FRAC_PI_2, 1.0);
+        let u = cam.to_raster_uniform();
+        // At default: fwd=(0,0,-1), rgt=(1,0,0), up=(0,1,0)
+        // view col 2 (encodes -fwd direction): [-fwd.x, -fwd.y, -fwd.z, 0]
+        //   = [0, 0, 1, 0]  (positive Z = "behind" camera = depth direction)
+        assert!(approx_eq(u.view[2][0], 0.0), "view[2][0] should be 0, got {}", u.view[2][0]);
+        assert!(approx_eq(u.view[2][1], 0.0), "view[2][1] should be 0, got {}", u.view[2][1]);
+        assert!(approx_eq(u.view[2][2], 1.0), "view[2][2] should be 1, got {}", u.view[2][2]);
     }
 
     /// to_uniform() must produce a forward vector that matches what ray(0.5, 0.5)

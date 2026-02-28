@@ -5,7 +5,8 @@
  *   1. Load the WASM module and initialise the GPU renderer.
  *   2. Accept a GLTF/GLB scene via drag-and-drop or file picker.
  *   3. Turntable camera: click-drag spins the scene in front of a fixed camera.
- *   4. Each frame: update_camera → render → get_pixels → putImageData on canvas.
+ *   4. Preview: update_camera → raster_frame → raster_get_pixels (60 fps rasterizer).
+ *   5. Idle / HQ: update_camera → render → get_pixels → putImageData (path tracer).
  */
 
 import init, {
@@ -14,6 +15,8 @@ import init, {
     update_camera,
     render,
     get_pixels,
+    raster_frame,
+    raster_get_pixels,
     get_scene_bounds,
 } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
@@ -171,28 +174,20 @@ const HQ_SAMPLES = 256;    // samples per pixel for a full quality render
 //
 // Two-phase preview strategy:
 //
-//   1. While dragging — render at PREVIEW_SCALE of the canvas size (e.g. 40%
-//      linear = ~16% of pixels). This is ~6× cheaper per sample, keeping the
-//      turntable feeling responsive even on complex scenes. The result is
-//      upscaled to fill the canvas with bilinear filtering.
+//   1. While dragging — call the rasterizer (raster_frame / raster_get_pixels).
+//      Hardware rasterisation runs at 60 fps with no GPU→CPU stall overhead, so
+//      the turntable feels instantaneous even on complex scenes.
 //
-//   2. While idle — auto-accumulate up to AUTO_ACCUM_SAMPLES at full resolution.
-//      Each successive sample averages with the last, so noise drops by ~√N.
-//      16 samples give a 4× noise reduction that makes the image look decent
-//      before the user ever clicks "Render".
-
-/** Linear scale applied to both dimensions during drag. 0.4 → ~16% of pixels. */
-const PREVIEW_SCALE = 0.4;
+//   2. While idle — auto-accumulate up to AUTO_ACCUM_SAMPLES path-tracer samples
+//      at full resolution. Each successive sample averages with the last, so
+//      noise drops by ~√N. 16 samples give a 4× noise reduction that makes the
+//      image look decent before the user ever clicks "Render".
 
 /** Number of samples to auto-accumulate after the camera stops moving. */
 const AUTO_ACCUM_SAMPLES = 16;
 
 /** Next sample index to submit during idle accumulation (0 = reset accumulator). */
 let previewSampleIdx = 0;
-
-/** Off-screen canvas used to hold the low-res drag frame before scaling it up. */
-const previewCanvas = document.createElement('canvas');
-const previewCtx    = previewCanvas.getContext('2d')!;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Canvas sizing
@@ -217,43 +212,26 @@ resizeCanvas();
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Render one low-resolution frame and scale it up to fill the canvas.
+ * Render one preview frame using the hardware rasterizer.
  *
- * Used while the camera is in motion (drag). The reduced pixel count makes
- * each dispatch roughly 6× cheaper, so the turntable stays snappy even on
- * heavy scenes. Quality is intentionally sacrificed here — the user is
- * spinning the model and won't notice the blur.
+ * The rasterizer runs entirely on the GPU (no ray traversal, no bounce
+ * accumulation) and produces a single complete frame at full canvas resolution
+ * in a fraction of a millisecond of GPU time. Called while the camera is in
+ * motion so the turntable stays snappy even on complex scenes.
+ *
+ * The camera is already uploaded before this is called (applyTurntable() does
+ * it), so we just dispatch and blit.
  */
 async function renderDragFrame(): Promise<void> {
     if (rendering) return;
     rendering = true;
 
-    const w  = canvas.width;
-    const h  = canvas.height;
-    const pw = Math.max(8, Math.floor(w * PREVIEW_SCALE));
-    const ph = Math.max(8, Math.floor(h * PREVIEW_SCALE));
+    const w = canvas.width;
+    const h = canvas.height;
 
-    // pw/ph has the same aspect ratio as w/h (uniform scale), so no camera tweak needed.
-    update_camera(
-        ...cameraPos(), -turntable.azimuth, -turntable.elevation, VFOV, w / h,
-    );
-
-    render(pw, ph, 0, true);
-    const pixels = await get_pixels(pw, ph);
-
-    // A 3×3 box blur on the low-res pixels before upscaling. Because the image
-    // is already small (pw×ph ≈ 16% of canvas area) this costs under 1 ms on
-    // the CPU and significantly smooths the single-sample noise without
-    // smearing edges in a noticeable way at display scale.
-    const blurred = boxBlur(new Uint8ClampedArray(pixels), pw, ph);
-
-    previewCanvas.width  = pw;
-    previewCanvas.height = ph;
-    previewCtx.putImageData(new ImageData(blurred, pw, ph), 0, 0);
-
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'medium';
-    ctx.drawImage(previewCanvas, 0, 0, w, h);
+    raster_frame(w, h);
+    const pixels = await raster_get_pixels(w, h);
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
 
     rendering = false;
 }
@@ -293,41 +271,6 @@ async function renderAccumFrame(sampleIdx: number): Promise<void> {
     }
 
     rendering = false;
-}
-
-/**
- * 3×3 box blur — averages each pixel with its 8 neighbours.
- *
- * Applied to the low-res drag frame before it is upscaled to the canvas.
- * The image is already small (PREVIEW_SCALE of the canvas), so the inner
- * loop touches a trivial number of pixels and finishes in under 1 ms.
- * The smoothing meaningfully reduces single-sample path-tracing noise
- * without visibly softening edges at display scale.
- */
-function boxBlur(src: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray<ArrayBuffer> {
-    const dst = new Uint8ClampedArray(new ArrayBuffer(src.length));
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            let r = 0, g = 0, b = 0, n = 0;
-            for (let dy = -1; dy <= 1; dy++) {
-                const ny = y + dy;
-                if (ny < 0 || ny >= h) continue;
-                for (let dx = -1; dx <= 1; dx++) {
-                    const nx = x + dx;
-                    if (nx < 0 || nx >= w) continue;
-                    const i = (ny * w + nx) * 4;
-                    r += src[i]; g += src[i + 1]; b += src[i + 2];
-                    n++;
-                }
-            }
-            const i = (y * w + x) * 4;
-            dst[i]     = r / n;
-            dst[i + 1] = g / n;
-            dst[i + 2] = b / n;
-            dst[i + 3] = 255;
-        }
-    }
-    return dst;
 }
 
 /** Compute the current world-space camera position from turntable state. */

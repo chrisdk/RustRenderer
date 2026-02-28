@@ -16,8 +16,10 @@
 pub mod gpu;
 pub mod intersect;
 pub mod math;
+pub mod raster;
 pub mod traverse;
 
 pub use gpu::Renderer;
+pub use raster::RasterRenderer;
 pub use traverse::HitRecord;
 pub use traverse::intersect_bvh;
