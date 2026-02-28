@@ -33,6 +33,7 @@
 
 use crate::camera::RasterCameraUniform;
 use crate::scene::{geometry::Vertex, material::Material, Scene};
+use super::GpuTexInfo;
 // texture::Texture used implicitly via scene.textures — no direct import needed
 
 // =============================================================================
@@ -52,20 +53,6 @@ struct GpuInstance {
     mat_index: u32,            // 4 bytes
 
     _pad: [u32; 3],            // 12 bytes — brings struct to 80 (a multiple of 16)
-}
-
-/// Per-texture metadata stored alongside the flat pixel data.
-///
-/// Must byte-for-byte match `GpuTextureInfo` in `renderer/gpu.rs` and the
-/// `TexInfo` struct in `raster.wgsl`. 16 bytes, multiple of 16.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuTexInfo {
-    /// Pixel index (not byte offset) into `tex_data` where this texture starts.
-    offset: u32,
-    width:  u32,
-    height: u32,
-    _pad:   u32,
 }
 
 /// One draw call: which triangles to draw (mesh geometry) and which row of the
@@ -714,17 +701,5 @@ mod tests {
         let _: &[u8] = bytemuck::bytes_of(&GpuInstance::zeroed());
     }
 
-    /// `GpuTexInfo` has an identical layout requirement to `GpuTextureInfo` in
-    /// `gpu.rs` — both must match the single `TexInfo` struct defined in the
-    /// WGSL shaders. If these diverge, texture sampling silently reads the wrong
-    /// pixels from the packed texture buffer.
-    #[test]
-    fn test_gpu_tex_info_layout() {
-        assert_eq!(size_of::<GpuTexInfo>(), 16,
-            "GpuTexInfo must be 16 bytes (multiple of 16 for WGSL storage arrays)");
-        assert_eq!(offset_of!(GpuTexInfo, offset), 0);
-        assert_eq!(offset_of!(GpuTexInfo, width),  4);
-        assert_eq!(offset_of!(GpuTexInfo, height), 8);
-        let _: &[u8] = bytemuck::bytes_of(&GpuTexInfo::zeroed());
-    }
+    // GpuTexInfo layout is tested once, authoritatively, in renderer::tests.
 }

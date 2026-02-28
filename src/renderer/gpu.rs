@@ -36,6 +36,7 @@ use crate::accel::bvh::Bvh;
 use crate::camera::CameraUniform;
 use crate::scene::material::Material;
 use crate::scene::texture::Texture;
+use super::GpuTexInfo;
 
 // ============================================================================
 // Supporting types
@@ -61,20 +62,6 @@ pub struct FrameUniforms {
     pub env_height:   u32,
     pub _pad0:        u32,
     pub _pad1:        u32,
-}
-
-/// Per-texture metadata uploaded to the GPU alongside the flat pixel data.
-///
-/// The shader uses this to locate each texture's pixel data within the shared
-/// `tex_data` storage buffer and to convert UV coordinates to pixel addresses.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuTextureInfo {
-    /// Pixel index (not byte offset) into `tex_data` where this texture starts.
-    offset: u32,
-    width:  u32,
-    height: u32,
-    _pad:   u32,
 }
 
 // ============================================================================
@@ -251,7 +238,7 @@ impl Renderer {
         // byte, matching the order the WGSL shader unpacks them. A separate
         // metadata buffer records where each texture starts in this flat array.
         let mut tex_data: Vec<u32> = Vec::new();
-        let mut tex_info: Vec<GpuTextureInfo> = Vec::new();
+        let mut tex_info: Vec<GpuTexInfo> = Vec::new();
 
         for texture in textures {
             let offset = tex_data.len() as u32;
@@ -261,14 +248,14 @@ impl Renderer {
             tex_data.extend(texture.data.chunks_exact(4).map(|c| {
                 (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
             }));
-            tex_info.push(GpuTextureInfo {
+            tex_info.push(GpuTexInfo {
                 offset, width: texture.width, height: texture.height, _pad: 0,
             });
         }
 
         // WebGPU requires non-zero buffer sizes even when nothing uses them.
         if tex_data.is_empty() { tex_data.push(0); }
-        if tex_info.is_empty() { tex_info.push(GpuTextureInfo { offset: 0, width: 0, height: 0, _pad: 0 }); }
+        if tex_info.is_empty() { tex_info.push(GpuTexInfo { offset: 0, width: 0, height: 0, _pad: 0 }); }
 
         self.tex_data_buf = Some(self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -658,15 +645,5 @@ mod tests {
         let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());
     }
 
-    /// `GpuTextureInfo` entries are stored in a storage buffer indexed by
-    /// material texture slots. The WGSL `TexInfo` struct must match exactly.
-    #[test]
-    fn test_gpu_texture_info_layout() {
-        assert_eq!(size_of::<GpuTextureInfo>(), 16,
-            "GpuTextureInfo must be 16 bytes (multiple of 16 for WGSL storage arrays)");
-        assert_eq!(offset_of!(GpuTextureInfo, offset), 0);
-        assert_eq!(offset_of!(GpuTextureInfo, width),  4);
-        assert_eq!(offset_of!(GpuTextureInfo, height), 8);
-        let _: &[u8] = bytemuck::bytes_of(&GpuTextureInfo::zeroed());
-    }
+    // GpuTexInfo layout is tested once, authoritatively, in renderer::tests.
 }

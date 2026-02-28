@@ -70,10 +70,10 @@ const DRAG_SPEED = 0.005;               // radians of rotation per pixel dragged
 const EL_MAX    = Math.PI / 2 - 0.05;   // elevation clamp — prevents camera flip
 
 /**
- * Push the current turntable state to the GPU.
+ * Converts the current turntable state to the camera parameters the WASM API
+ * expects, without touching any rendering state.
  *
- * Converts spherical (azimuth, elevation, radius) to Cartesian camera position
- * plus the yaw/pitch angles the WASM API expects. The mapping is:
+ * The mapping from spherical (azimuth, elevation, radius) to Cartesian is:
  *
  *   position = target + r * (sin(az)*cos(el),  sin(el),  cos(az)*cos(el))
  *   yaw      = −az      (camera looks toward target, not away from it)
@@ -83,18 +83,27 @@ const EL_MAX    = Math.PI / 2 - 0.05;   // elevation clamp — prevents camera f
  *   fwd = (sin(yaw)*cos(pitch), sin(pitch), −cos(yaw)*cos(pitch))
  * Setting yaw=−az, pitch=−el makes fwd point from position toward target.
  */
-function applyTurntable(): void {
+function turntableCameraParams(): { px: number; py: number; pz: number; yaw: number; pitch: number } {
     const { target: [tx, ty, tz], azimuth: az, elevation: el, radius: r } = turntable;
-
     const cosEl = Math.cos(el);
-    const px = tx + r * Math.sin(az) * cosEl;
-    const py = ty + r * Math.sin(el);
-    const pz = tz + r * Math.cos(az) * cosEl;
+    return {
+        px: tx + r * Math.sin(az) * cosEl,
+        py: ty + r * Math.sin(el),
+        pz: tz + r * Math.cos(az) * cosEl,
+        yaw:   -az,
+        pitch: -el,
+    };
+}
 
+/**
+ * Uploads the current turntable state to the GPU and marks the camera dirty
+ * so the render loop draws a fresh frame.
+ */
+function applyTurntable(): void {
+    const { px, py, pz, yaw, pitch } = turntableCameraParams();
     const w = canvas.width  || 1;
     const h = canvas.height || 1;
-
-    update_camera(px, py, pz, -az, -el, VFOV, w / h);
+    update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
     cameraDirty = true;
 }
 
@@ -341,15 +350,11 @@ async function startHighQualityRender(): Promise<void> {
     const w = canvas.width;
     const h = canvas.height;
 
-    // Lock in the current camera for the full render.
-    const { target: [tx, ty, tz], azimuth: az, elevation: el, radius: r } = turntable;
-    const cosEl = Math.cos(el);
-    update_camera(
-        tx + r * Math.sin(az) * cosEl,
-        ty + r * Math.sin(el),
-        tz + r * Math.cos(az) * cosEl,
-        -az, -el, VFOV, w / h,
-    );
+    // Lock in the current camera for the full render. Use turntableCameraParams()
+    // rather than applyTurntable() to avoid setting cameraDirty, which would
+    // trigger a raster frame on top of the path-traced output.
+    const { px, py, pz, yaw, pitch } = turntableCameraParams();
+    update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
 
     for (let i = 0; i < HQ_SAMPLES && !hqCancelled; i++) {
         render(w, h, i, false);
