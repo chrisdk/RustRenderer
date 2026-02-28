@@ -167,6 +167,33 @@ let hqCancelled = false;   // set to true to stop the loop after the current sam
 
 const HQ_SAMPLES = 256;    // samples per pixel for a full quality render
 
+// ── Preview quality settings ──────────────────────────────────────────────────
+//
+// Two-phase preview strategy:
+//
+//   1. While dragging — render at PREVIEW_SCALE of the canvas size (e.g. 40%
+//      linear = ~16% of pixels). This is ~6× cheaper per sample, keeping the
+//      turntable feeling responsive even on complex scenes. The result is
+//      upscaled to fill the canvas with bilinear filtering.
+//
+//   2. While idle — auto-accumulate up to AUTO_ACCUM_SAMPLES at full resolution.
+//      Each successive sample averages with the last, so noise drops by ~√N.
+//      16 samples give a 4× noise reduction that makes the image look decent
+//      before the user ever clicks "Render".
+
+/** Linear scale applied to both dimensions during drag. 0.4 → ~16% of pixels. */
+const PREVIEW_SCALE = 0.4;
+
+/** Number of samples to auto-accumulate after the camera stops moving. */
+const AUTO_ACCUM_SAMPLES = 16;
+
+/** Next sample index to submit during idle accumulation (0 = reset accumulator). */
+let previewSampleIdx = 0;
+
+/** Off-screen canvas used to hold the low-res drag frame before scaling it up. */
+const previewCanvas = document.createElement('canvas');
+const previewCtx    = previewCanvas.getContext('2d')!;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Canvas sizing
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,48 +205,118 @@ function resizeCanvas(): void {
         canvas.width  = w;
         canvas.height = h;
         cameraDirty   = true;
+        previewSampleIdx = 0;  // old accum buffer is now the wrong size
     }
 }
 
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Render helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Dispatch a render, read pixels back from the GPU, and blit to the canvas.
+ * Render one low-resolution frame and scale it up to fill the canvas.
+ *
+ * Used while the camera is in motion (drag). The reduced pixel count makes
+ * each dispatch roughly 6× cheaper, so the turntable stays snappy even on
+ * heavy scenes. Quality is intentionally sacrificed here — the user is
+ * spinning the model and won't notice the blur.
  */
-async function renderFrame(): Promise<void> {
+async function renderDragFrame(): Promise<void> {
     if (rendering) return;
     rendering = true;
 
-    const w = canvas.width;
-    const h = canvas.height;
-    const { target: [tx, ty, tz], azimuth: az, elevation: el, radius: r } = turntable;
-    const cosEl = Math.cos(el);
+    const w  = canvas.width;
+    const h  = canvas.height;
+    const pw = Math.max(8, Math.floor(w * PREVIEW_SCALE));
+    const ph = Math.max(8, Math.floor(h * PREVIEW_SCALE));
 
+    // pw/ph has the same aspect ratio as w/h (uniform scale), so no camera tweak needed.
     update_camera(
-        tx + r * Math.sin(az) * cosEl,
-        ty + r * Math.sin(el),
-        tz + r * Math.cos(az) * cosEl,
-        -az, -el, VFOV, w / h,
+        ...cameraPos(), -turntable.azimuth, -turntable.elevation, VFOV, w / h,
     );
 
-    render(w, h, 0);
+    render(pw, ph, 0);
+    const pixels = await get_pixels(pw, ph);
 
-    const pixels  = await get_pixels(w, h);
-    const clamped = new Uint8ClampedArray(pixels);
-    ctx.putImageData(new ImageData(clamped, w, h), 0, 0);
+    previewCanvas.width  = pw;
+    previewCanvas.height = ph;
+    previewCtx.putImageData(new ImageData(new Uint8ClampedArray(pixels), pw, ph), 0, 0);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.drawImage(previewCanvas, 0, 0, w, h);
 
     rendering = false;
 }
 
 /**
- * Main animation loop. Triggers a render whenever the camera changes.
- * Kept simple now that there is no per-frame keyboard movement to process.
+ * Render one full-resolution accumulation sample.
+ *
+ * Passing `sampleIdx === 0` resets the GPU accumulator; subsequent calls add
+ * to the running average. After AUTO_ACCUM_SAMPLES frames the loop stops and
+ * the canvas holds a noticeably cleaner image.
+ */
+async function renderAccumFrame(sampleIdx: number): Promise<void> {
+    if (rendering) return;
+    rendering = true;
+
+    const w = canvas.width;
+    const h = canvas.height;
+
+    if (sampleIdx === 0) {
+        // Lock the camera at the start of the accumulation sequence so all
+        // samples share an identical viewpoint.
+        update_camera(
+            ...cameraPos(), -turntable.azimuth, -turntable.elevation, VFOV, w / h,
+        );
+    }
+
+    render(w, h, sampleIdx);
+    const pixels = await get_pixels(w, h);
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
+
+    previewSampleIdx = sampleIdx + 1;
+
+    if (previewSampleIdx < AUTO_ACCUM_SAMPLES) {
+        setStatus(`Refining… ${previewSampleIdx} / ${AUTO_ACCUM_SAMPLES} spp`);
+    } else {
+        setStatus('Drag to spin · click Render for full quality');
+    }
+
+    rendering = false;
+}
+
+/** Compute the current world-space camera position from turntable state. */
+function cameraPos(): [number, number, number] {
+    const { target: [tx, ty, tz], azimuth: az, elevation: el, radius: r } = turntable;
+    const cosEl = Math.cos(el);
+    return [
+        tx + r * Math.sin(az) * cosEl,
+        ty + r * Math.sin(el),
+        tz + r * Math.cos(az) * cosEl,
+    ];
+}
+
+/**
+ * Main animation loop.
+ *
+ * Priority order (highest first):
+ *   1. Camera changed → render a quick drag frame and reset accumulation.
+ *   2. Idle, accumulation not complete → render the next accumulation sample.
+ *   3. Nothing to do → wait for next frame.
  */
 function tick(): void {
-    if (!hqRendering && cameraDirty && sceneLoaded && !rendering) {
-        cameraDirty = false;
-        renderFrame();
+    if (!hqRendering && sceneLoaded && !rendering) {
+        if (cameraDirty) {
+            cameraDirty      = false;
+            previewSampleIdx = 0;
+            renderDragFrame();
+        } else if (previewSampleIdx < AUTO_ACCUM_SAMPLES) {
+            renderAccumFrame(previewSampleIdx);
+        }
     }
 
     requestAnimationFrame(tick);
@@ -237,7 +334,7 @@ async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
         applyTurntable();
         sceneLoaded = true;
         renderBtn.disabled = false;
-        setStatus('Scene loaded — drag to spin');
+        setStatus('Refining… 0 / 16 spp');
         fadeHints();
     } catch (err) {
         setStatus(`Error: ${err}`);
@@ -286,6 +383,9 @@ async function startHighQualityRender(): Promise<void> {
     hqRendering = false;
     renderBtn.textContent = 'Render';
     renderBtn.classList.remove('cancel');
+
+    // Prevent idle accumulation from overwriting the completed render.
+    previewSampleIdx = AUTO_ACCUM_SAMPLES;
 
     if (hqCancelled) {
         setStatus('Render cancelled — drag to spin');
