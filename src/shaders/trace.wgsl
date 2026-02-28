@@ -505,15 +505,19 @@ fn sample_env(dir: vec3<f32>) -> vec3<f32> {
 // Returns the radiance for a ray that escaped the scene without hitting
 // any geometry.
 //
-// When an HDR environment map is loaded (env_width > 0) it is sampled
-// directly — this gives physically-based ambient lighting, correct
-// coloured reflections in metals, and a background that matches the IBL.
+// When an HDR environment map is loaded (env_width > 0) AND IBL is not
+// disabled (flags bit 1 == 0), the map is sampled directly — giving
+// physically-based ambient lighting, correct coloured reflections in
+// metals, and a background that matches the IBL.
 //
-// Without an env map the procedural gradient is used as a fallback.
+// IBL is toggled by bit 1 of frame.flags so the user can quickly compare
+// the env-lit render against the procedural sky without reloading.
+//
 // The sun is handled exclusively by NEE (see main path loop) so it does
 // not appear here regardless of which sky path is taken.
 fn sky_color(dir: vec3<f32>) -> vec3<f32> {
-    if frame.env_width > 0u {
+    let ibl_disabled = (frame.flags & 2u) != 0u;
+    if frame.env_width > 0u && !ibl_disabled {
         return sample_env(dir);
     }
     let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);

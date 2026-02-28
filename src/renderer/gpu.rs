@@ -108,6 +108,10 @@ pub struct Renderer {
     /// Passed to the shader in `FrameUniforms`; zero width triggers the
     /// procedural sky fallback.
     pub(crate) env_dims: (u32, u32),
+    /// When `false`, the shader ignores the env map and falls back to the
+    /// procedural sky even if one is loaded. Toggled by `set_ibl_enabled`.
+    /// Corresponds to bit 1 of `FrameUniforms::flags`.
+    pub ibl_enabled: bool,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
@@ -195,6 +199,7 @@ impl Renderer {
             tex_info_buf:   None,
             env_pixels_buf,
             env_dims:       (0, 0),
+            ibl_enabled:    true,
             camera_buf:     None,
             frame_buf:      None,
             output_buf:     None,
@@ -492,7 +497,10 @@ impl Renderer {
         }
 
         // Upload frame uniforms.
-        let flags = if preview { 1u32 } else { 0u32 };
+        // Bit 0: preview mode (cap bounces for interactive speed).
+        // Bit 1: IBL disabled (use procedural sky even if an env map is loaded).
+        let flags = if preview         { 1u32 } else { 0u32 }
+                  | if !self.ibl_enabled { 2u32 } else { 0u32 };
         let frame_data = FrameUniforms {
             width, height, sample_index, flags,
             env_width:  self.env_dims.0,

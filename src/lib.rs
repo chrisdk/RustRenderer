@@ -177,6 +177,27 @@ pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
     })
 }
 
+/// Enables or disables Image-Based Lighting for path-traced renders.
+///
+/// When `enabled` is `true` (the default), the loaded HDR environment map
+/// is used for the background, ambient lighting, and reflections. When
+/// `false`, the path tracer falls back to the procedural sky gradient even
+/// if an env map is loaded — useful for A/B comparisons or artistic control.
+///
+/// Has no effect on the rasteriser preview, which always uses its own
+/// procedural sky. Changes take effect on the next `render()` call; the
+/// accumulator is automatically reset so you see a clean result.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_ibl_enabled(enabled: bool) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.ibl_enabled = enabled;
+            log::info!("IBL {}", if enabled { "enabled" } else { "disabled" });
+        }
+    });
+}
+
 /// Returns the world-space axis-aligned bounding box of the loaded scene as a
 /// `Float32Array` of six values: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
 ///

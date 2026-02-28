@@ -146,6 +146,54 @@
 
         #file-input, #env-file-input { display: none; }
 
+        /* ── IBL toggle ─────────────────────────────────────────────────────── */
+
+        #ibl-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 3px 2px;
+        }
+        #ibl-row label {
+            font-size: 12px;
+            color: rgba(255,255,255,0.50);
+            cursor: pointer;
+            user-select: none;
+        }
+        /* Pill-style checkbox */
+        #ibl-toggle {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 30px;
+            height: 16px;
+            border-radius: 8px;
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.20);
+            cursor: pointer;
+            position: relative;
+            transition: background 0.15s;
+            flex-shrink: 0;
+        }
+        #ibl-toggle::after {
+            content: '';
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.50);
+            top: 2px;
+            left: 2px;
+            transition: left 0.15s, background 0.15s;
+        }
+        #ibl-toggle:checked {
+            background: rgba(70, 130, 255, 0.50);
+            border-color: rgba(110, 165, 255, 0.60);
+        }
+        #ibl-toggle:checked::after {
+            left: 16px;
+            background: #fff;
+        }
+
         /* ── Canvas area (right side) ──────────────────────────────────────── */
 
         #canvas-wrap {
@@ -220,6 +268,11 @@
         <div class="divider"></div>
 
         <button id="render-btn" disabled>Render</button>
+
+        <div id="ibl-row">
+            <input id="ibl-toggle" type="checkbox" checked>
+            <label for="ibl-toggle">Environment lighting</label>
+        </div>
 
         <div class="divider"></div>
 

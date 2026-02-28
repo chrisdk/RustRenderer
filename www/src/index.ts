@@ -13,6 +13,7 @@ import init, {
     init_renderer,
     load_scene,
     load_environment,
+    set_ibl_enabled,
     update_camera,
     render,
     get_pixels,
@@ -31,6 +32,7 @@ const ctx         = canvas.getContext('2d')!;
 const statusEl    = document.getElementById('status')!;
 const fileInput   = document.getElementById('file-input')    as HTMLInputElement;
 const envInput    = document.getElementById('env-file-input') as HTMLInputElement;
+const iblToggle   = document.getElementById('ibl-toggle')    as HTMLInputElement;
 const hintsEl     = document.getElementById('hints')!;
 const dropOverlay = document.getElementById('drop-overlay')!;
 const scenePicker = document.getElementById('scene-picker')!;
@@ -430,6 +432,19 @@ function fadeHints(): void {
 // Boot sequence
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IBL toggle
+// ─────────────────────────────────────────────────────────────────────────────
+
+iblToggle.addEventListener('change', () => {
+    set_ibl_enabled(iblToggle.checked);
+    // Restart the HQ render if it's running, or mark camera dirty so
+    // the next Render click starts fresh (accumulator reset happens in WASM).
+    if (hqRendering) {
+        hqCancelled = true;
+    }
+});
+
 async function main(): Promise<void> {
     setStatus('Loading WASM…');
     try {
@@ -450,6 +465,17 @@ async function main(): Promise<void> {
         console.error('init_renderer failed:', err);
         return;
     }
+
+    // Kick off the default env map fetch in the background — the renderer
+    // is perfectly usable without it; it just falls back to procedural sky.
+    // We don't await this so the rest of the UI comes up immediately.
+    fetch('assets/golden_gate_hills_2k.hdr')
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.arrayBuffer();
+        })
+        .then(buf => loadEnvironmentBytes(new Uint8Array(buf)))
+        .catch(err => console.warn('Default env map not loaded:', err));
 
     setStatus('Choose a scene below, or drop a GLTF / GLB file');
 

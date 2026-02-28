@@ -16,11 +16,13 @@
 //!
 //! ## Binding layout
 //!
-//! | Group | Binding | Name        | Type    | Shader stage |
-//! |-------|---------|-------------|---------|--------------|
-//! | 0     | 0       | camera      | uniform | vertex + frag |
-//! | 0     | 1       | instances   | storage | vertex       |
-//! | 0     | 2       | materials   | storage | fragment     |
+//! | Group | Binding | Name        | Type    | Shader stage       |
+//! |-------|---------|-------------|---------|---------------------|
+//! | 0     | 0       | camera      | uniform | vertex + fragment  |
+//! | 0     | 1       | instances   | storage | vertex             |
+//! | 0     | 2       | materials   | storage | fragment           |
+//! | 0     | 3       | tex_data    | storage | fragment           |
+//! | 0     | 4       | tex_info    | storage | fragment           |
 //!
 //! ## Rendering approach
 //!
@@ -31,6 +33,7 @@
 
 use crate::camera::RasterCameraUniform;
 use crate::scene::{geometry::Vertex, material::Material, Scene};
+// texture::Texture used implicitly via scene.textures — no direct import needed
 
 // =============================================================================
 // Supporting types
@@ -49,6 +52,20 @@ struct GpuInstance {
     mat_index: u32,            // 4 bytes
 
     _pad: [u32; 3],            // 12 bytes — brings struct to 80 (a multiple of 16)
+}
+
+/// Per-texture metadata stored alongside the flat pixel data.
+///
+/// Must byte-for-byte match `GpuTextureInfo` in `renderer/gpu.rs` and the
+/// `TexInfo` struct in `raster.wgsl`. 16 bytes, multiple of 16.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuTexInfo {
+    /// Pixel index (not byte offset) into `tex_data` where this texture starts.
+    offset: u32,
+    width:  u32,
+    height: u32,
+    _pad:   u32,
 }
 
 /// One draw call: which triangles to draw (mesh geometry) and which row of the
@@ -82,6 +99,11 @@ pub struct RasterRenderer {
     index_buf:    Option<wgpu::Buffer>,
     instance_buf: Option<wgpu::Buffer>,
     material_buf: Option<wgpu::Buffer>,
+    /// Flat RGBA8 pixel data for all scene textures, packed as one u32 per pixel.
+    /// Same format and packing as the path-tracer's `tex_data_buf`.
+    tex_data_buf: Option<wgpu::Buffer>,
+    /// Per-texture metadata (offset, width, height). Indexes into `tex_data_buf`.
+    tex_info_buf: Option<wgpu::Buffer>,
     draw_calls:   Vec<DrawCall>,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
@@ -112,6 +134,8 @@ impl RasterRenderer {
             index_buf:    None,
             instance_buf: None,
             material_buf: None,
+            tex_data_buf: None,
+            tex_info_buf: None,
             draw_calls:   Vec::new(),
             camera_buf:   None,
             output_tex:   None,
@@ -192,6 +216,37 @@ impl RasterRenderer {
             &wgpu::util::BufferInitDescriptor {
                 label:    Some("raster_materials"),
                 contents: bytemuck::cast_slice(mat_data),
+                usage:    wgpu::BufferUsages::STORAGE,
+            },
+        ));
+
+        // ── Texture buffers ──────────────────────────────────────────────────
+        // Pack all scene textures into a single flat RGBA8 storage buffer and
+        // a parallel metadata buffer. Identical packing to the path tracer so
+        // the WGSL sample_tex() function works the same way in both shaders.
+        let mut tex_data: Vec<u32>       = Vec::new();
+        let mut tex_info: Vec<GpuTexInfo> = Vec::new();
+        for texture in &scene.textures {
+            let offset = tex_data.len() as u32;
+            tex_data.extend(texture.data.chunks_exact(4).map(|c| {
+                (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
+            }));
+            tex_info.push(GpuTexInfo { offset, width: texture.width, height: texture.height, _pad: 0 });
+        }
+        if tex_data.is_empty() { tex_data.push(0); }
+        if tex_info.is_empty() { tex_info.push(GpuTexInfo { offset: 0, width: 0, height: 0, _pad: 0 }); }
+
+        self.tex_data_buf = Some(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("raster_tex_data"),
+                contents: bytemuck::cast_slice(&tex_data),
+                usage:    wgpu::BufferUsages::STORAGE,
+            },
+        ));
+        self.tex_info_buf = Some(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("raster_tex_info"),
+                contents: bytemuck::cast_slice(&tex_info),
                 usage:    wgpu::BufferUsages::STORAGE,
             },
         ));
@@ -302,6 +357,28 @@ impl RasterRenderer {
                 // Binding 2: materials (fragment only)
                 wgpu::BindGroupLayoutEntry {
                     binding:    2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
+                // Binding 3: flat RGBA8 texture pixel data (fragment only)
+                wgpu::BindGroupLayoutEntry {
+                    binding:    3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
+                // Binding 4: per-texture metadata (offset, width, height)
+                wgpu::BindGroupLayoutEntry {
+                    binding:    4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty:                 wgpu::BufferBindingType::Storage { read_only: true },
@@ -462,6 +539,14 @@ impl RasterRenderer {
                 wgpu::BindGroupEntry {
                     binding:  2,
                     resource: self.material_buf.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  3,
+                    resource: self.tex_data_buf.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  4,
+                    resource: self.tex_info_buf.as_ref().unwrap().as_entire_binding(),
                 },
             ],
         });
