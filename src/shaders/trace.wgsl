@@ -19,8 +19,8 @@
 //   - Glass/transmissive surfaces: Snell's law refraction with exact Fresnel
 //     (dielectric equations, not Schlick — glass needs more precision than
 //     the approximation gives near the critical angle).
-//   - Normal maps: tangent frame derived analytically from triangle geometry
-//     and UVs (no extra tangent buffer required).
+//   - Normal maps: stored per-vertex GLTF tangents (Mikktspace), giving the
+//     same tangent basis the map was baked against.
 //   - Sky: procedural gradient with a physically-sized sun disk.
 //   - Tone mapping: ACES filmic curve (Narkowicz 2015 fit).
 //
@@ -50,16 +50,16 @@ struct BvhNode {
     count:          u32,
 }
 
-// Matches accel::bvh::BvhTriangle (128 bytes).
+// Matches accel::bvh::BvhTriangle (160 bytes).
 //
 // WGSL vec3<f32> has 16-byte alignment which would drift from the packed Rust
 // [f32; 3] layout, so all fields are spelled out as individual scalars.
 //
-//   offsets   0..35  : v0/v1/v2 positions (nine f32s)
-//   offsets  36..51  : i0, i1, i2, material_index (four u32s)
-//   offsets  52..87  : n0/n1/n2 normals (nine f32s)
-//   offsets  88..111 : uv0/uv1/uv2 (six f32s)
-//   offsets 112..127 : padding (four u32s)
+//   offsets   0..35  : v0/v1/v2 positions     (nine  f32s)
+//   offsets  36..51  : i0, i1, i2, material   (four  u32s)
+//   offsets  52..87  : n0/n1/n2 normals        (nine  f32s)
+//   offsets  88..111 : uv0/uv1/uv2             (six   f32s)
+//   offsets 112..159 : t0/t1/t2 tangents       (twelve f32s, xyz+w each)
 struct BvhTriangle {
     v0x: f32, v0y: f32, v0z: f32,
     v1x: f32, v1y: f32, v1z: f32,
@@ -72,7 +72,12 @@ struct BvhTriangle {
     uv0u: f32, uv0v: f32,
     uv1u: f32, uv1v: f32,
     uv2u: f32, uv2v: f32,
-    _p0: u32, _p1: u32, _p2: u32, _p3: u32,
+    // xyz = world-space tangent direction, w = handedness (+1 or -1).
+    // Stored from the GLTF file so normal maps decode against the same
+    // tangent basis they were baked in.
+    t0x: f32, t0y: f32, t0z: f32, t0w: f32,
+    t1x: f32, t1y: f32, t1z: f32, t1w: f32,
+    t2x: f32, t2y: f32, t2z: f32, t2w: f32,
 }
 
 // Matches scene::material::Material (64 bytes).
@@ -481,45 +486,41 @@ fn sky_color(dir: vec3<f32>) -> vec3<f32> {
 // Normal mapping
 // ============================================================================
 
-// Compute the tangent-space TBN matrix analytically from triangle edge
-// vectors and UV deltas (the standard "cotangent method"). Then apply a
-// normal-map sample to perturb the smooth interpolated surface normal.
+// Apply a normal map using the stored per-vertex tangent (GLTF convention).
 //
-// This avoids storing tangents in the BvhTriangle — the GPU computes them
-// on the fly. For most meshes this is correct; for degenerate UV islands
-// (zero area in UV space) we fall back to the unperturbed smooth normal.
+// GLTF normal maps are baked against Mikktspace tangents, which are stored
+// in the file alongside normals. Using the stored tangent — rather than
+// deriving one analytically from triangle edges — gives correct results at UV
+// seams and on mirrored UV islands, where the cotangent method can silently
+// produce the wrong tangent direction.
+//
+// T4.w is the handedness bit (+1 or -1). It flips the bitangent for UV islands
+// whose winding is mirrored, which is exactly the case the analytical method
+// gets wrong.
+//
+// Falls back to the unperturbed smooth normal if the texture index is negative
+// (no map), the map sample is degenerate, or the tangent is a zero vector
+// (vertex had no tangent data in the source file).
 fn apply_normal_map(
-    tex_idx:        i32,
-    uv:             vec2<f32>,
-    smooth_normal:  vec3<f32>,
-    v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>,
-    uv0: vec2<f32>, uv1: vec2<f32>, uv2: vec2<f32>,
+    tex_idx:       i32,
+    uv:            vec2<f32>,
+    smooth_normal: vec3<f32>,
+    T4:            vec4<f32>,  // xyz = world-space tangent, w = handedness
 ) -> vec3<f32> {
     if tex_idx < 0 { return smooth_normal; }
 
     // Sample the normal map. Values are in [0,1]; remap to tangent-space [-1,1].
     let ts = sample_texture(tex_idx, uv).xyz * 2.0 - 1.0;
-    if dot(ts, ts) < 0.01 { return smooth_normal; }  // degenerate map sample
+    if dot(ts, ts) < 0.01 { return smooth_normal; }  // blank/degenerate map
 
-    // Triangle edge vectors and UV deltas.
-    let dp1  = v1 - v0;
-    let dp2  = v2 - v0;
-    let duv1 = uv1 - uv0;
-    let duv2 = uv2 - uv0;
+    // Guard against meshes that shipped without tangent data.
+    if dot(T4.xyz, T4.xyz) < 0.01 { return smooth_normal; }
 
-    let det = duv1.x * duv2.y - duv1.y * duv2.x;
-    if abs(det) < 1e-7 { return smooth_normal; }  // degenerate UV island
+    let T = normalize(T4.xyz);
+    // Bitangent = cross(N, T) * handedness. The sign flip corrects mirrored UVs.
+    let B = normalize(cross(smooth_normal, T)) * T4.w;
 
-    let r = 1.0 / det;
-    var T = normalize((duv2.y * dp1 - duv1.y * dp2) * r);
-    var B = normalize((-duv2.x * dp1 + duv1.x * dp2) * r);
-
-    // Re-orthogonalise T and B against the smooth normal (Gram-Schmidt).
-    // This handles slight mismatches between the vertex-interpolated normal
-    // and the face-derived tangent frame.
-    T = normalize(T - dot(T, smooth_normal) * smooth_normal);
-    B = normalize(cross(smooth_normal, T));
-
+    // TBN rotates tangent-space → world-space.
     return normalize(T * ts.x + B * ts.y + smooth_normal * ts.z);
 }
 
@@ -644,14 +645,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let roughness = max(mat.roughness * mr_sample.g, 0.04); // clamp to avoid singularities
         let alpha     = roughness * roughness;  // perceptual → linear roughness
 
-        // Normal map (computed analytically from triangle geometry + UVs).
-        let v0  = vec3(tri.v0x, tri.v0y, tri.v0z);
-        let v1  = vec3(tri.v1x, tri.v1y, tri.v1z);
-        let v2  = vec3(tri.v2x, tri.v2y, tri.v2z);
-        let uv0 = vec2(tri.uv0u, tri.uv0v);
-        let uv1 = vec2(tri.uv1u, tri.uv1v);
-        let uv2 = vec2(tri.uv2u, tri.uv2v);
-        let shading_n = apply_normal_map(mat.normal_tex, uv, smooth_n, v0, v1, v2, uv0, uv1, uv2);
+        // Normal map — barycentrically interpolate the stored per-vertex tangents,
+        // then decode the map in the correct Mikktspace tangent basis.
+        //
+        // Handedness (w) is constant across a triangle — it encodes whether
+        // the UV island is mirrored, which is a per-island property, not per-
+        // vertex. Taking t0.w is correct; we just need the xyz interpolated.
+        let t0 = vec4(tri.t0x, tri.t0y, tri.t0z, tri.t0w);
+        let t1 = vec4(tri.t1x, tri.t1y, tri.t1z, tri.t1w);
+        let t2 = vec4(tri.t2x, tri.t2y, tri.t2z, tri.t2w);
+        let tangent = vec4(
+            normalize(bary_w * t0.xyz + hit.u * t1.xyz + hit.v * t2.xyz),
+            t0.w,
+        );
+        let shading_n = apply_normal_map(mat.normal_tex, uv, smooth_n, tangent);
 
         // ── Emission ──────────────────────────────────────────────────────────
         radiance += throughput * emissive;

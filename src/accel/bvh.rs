@@ -99,10 +99,11 @@ pub struct BvhNode {
 ///
 /// Everything the shader needs to shade a hit point is packed here:
 /// world-space positions for intersection, world-space normals for lighting,
-/// UV coordinates for texture sampling, and the material index.
+/// UV coordinates for texture sampling, per-vertex tangents for normal mapping,
+/// and the material index.
 ///
-/// Padded to 128 bytes, a multiple of 16 as required for WGSL storage-buffer
-/// array elements. The `_pad` field is always zero and ignored by the shader.
+/// 160 bytes — a multiple of 16 as required for WGSL storage-buffer elements.
+/// `#[repr(C)]` and `bytemuck::Pod` allow zero-copy GPU upload.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BvhTriangle {
@@ -118,11 +119,11 @@ pub struct BvhTriangle {
     // ── Vertex indices and material ───────────────────────────────────────────
 
     /// Index of the first vertex in [`Scene::vertices`], for shading data.
-    pub i0: u32,            // offset 36
+    pub i0: u32,             // offset 36
     /// Index of the second vertex in [`Scene::vertices`], for shading data.
-    pub i1: u32,            // offset 40
+    pub i1: u32,             // offset 40
     /// Index of the third vertex in [`Scene::vertices`], for shading data.
-    pub i2: u32,            // offset 44
+    pub i2: u32,             // offset 44
     /// Index into [`Scene::materials`] for shading this triangle's surface.
     pub material_index: u32, // offset 48
 
@@ -148,8 +149,22 @@ pub struct BvhTriangle {
     /// UV coordinates at vertex 2.
     pub uv2: [f32; 2],  // offset 104
 
-    /// Padding to 128 bytes. Always zero; ignored by the GPU.
-    pub _pad: [u32; 4], // offset 112
+    // ── World-space vertex tangents (for normal mapping) ─────────────────────
+    //
+    // GLTF normal maps are baked against Mikktspace tangents, stored per-vertex
+    // in the file. Using these directly (rather than deriving tangents from
+    // triangle edges) gives correct results at UV seams and mirrored UV islands.
+    //
+    // xyz = world-space tangent direction (normalised)
+    // w   = handedness: +1 or -1. The bitangent is cross(N, T) * w, which
+    //       corrects the sign for UV islands whose winding is mirrored.
+
+    /// World-space tangent at vertex 0 (xyz = direction, w = handedness).
+    pub t0: [f32; 4],   // offset 112
+    /// World-space tangent at vertex 1.
+    pub t1: [f32; 4],   // offset 128
+    /// World-space tangent at vertex 2.
+    pub t2: [f32; 4],   // offset 144
 }
 
 /// The fully built BVH acceleration structure.
@@ -190,7 +205,7 @@ impl Bvh {
                 material_index: t.material_index,
                 n0: t.n0, n1: t.n1, n2: t.n2,
                 uv0: t.uv0, uv1: t.uv1, uv2: t.uv2,
-                _pad: [0; 4],
+                t0: t.t0, t1: t.t1, t2: t.t2,
             })
             .collect();
 
@@ -222,6 +237,9 @@ struct BuildTriangle {
     i0: u32, i1: u32, i2: u32,
     n0: [f32; 3], n1: [f32; 3], n2: [f32; 3],
     uv0: [f32; 2], uv1: [f32; 2], uv2: [f32; 2],
+    /// World-space tangents (xyz = direction, w = handedness). The xyz
+    /// component is rotated with the instance transform; w is unchanged.
+    t0: [f32; 4], t1: [f32; 4], t2: [f32; 4],
     material_index: u32,
 }
 
@@ -260,6 +278,14 @@ fn collect_triangles(scene: &Scene) -> Vec<BuildTriangle> {
             let n1 = transform_normal(xform, vert1.normal);
             let n2 = transform_normal(xform, vert2.normal);
 
+            // Tangents transform the same way as normals (direction vectors),
+            // except the w handedness component is a scalar — it survives the
+            // transform unchanged. The sign encodes whether the UV island is
+            // mirrored; no rotation can flip that.
+            let t0 = transform_tangent(xform, vert0.tangent);
+            let t1 = transform_tangent(xform, vert1.tangent);
+            let t2 = transform_tangent(xform, vert2.tangent);
+
             let centroid = [
                 (v0[0] + v1[0] + v2[0]) / 3.0,
                 (v0[1] + v1[1] + v2[1]) / 3.0,
@@ -271,6 +297,7 @@ fn collect_triangles(scene: &Scene) -> Vec<BuildTriangle> {
                 i0, i1, i2,
                 n0, n1, n2,
                 uv0: vert0.uv, uv1: vert1.uv, uv2: vert2.uv,
+                t0, t1, t2,
                 material_index: mesh.material_index,
             });
         }
@@ -391,6 +418,18 @@ fn transform_normal(m: &[[f32; 4]; 4], n: [f32; 3]) -> [f32; 3] {
     if len > 1e-8 { [x/len, y/len, z/len] } else { n }
 }
 
+/// Transforms a GLTF tangent vector `[tx, ty, tz, w]` by a column-major 4×4
+/// matrix.
+///
+/// The xyz component is rotated exactly like a normal (upper-left 3×3, then
+/// renormalise). The w component — the handedness bit (+1 or −1) that tells
+/// the shader which way the bitangent points — is a pure scalar and passes
+/// through unchanged: no spatial rotation can flip the winding of a UV island.
+fn transform_tangent(m: &[[f32; 4]; 4], t: [f32; 4]) -> [f32; 4] {
+    let xyz = transform_normal(m, [t[0], t[1], t[2]]);
+    [xyz[0], xyz[1], xyz[2], t[3]]
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -477,7 +516,7 @@ mod tests {
     #[test]
     fn test_bvh_triangle_gpu_layout() {
         use std::mem::{offset_of, size_of};
-        assert_eq!(size_of::<BvhTriangle>(),                   128);
+        assert_eq!(size_of::<BvhTriangle>(),                   160);
         assert_eq!(offset_of!(BvhTriangle, v0),                  0);
         assert_eq!(offset_of!(BvhTriangle, v1),                 12);
         assert_eq!(offset_of!(BvhTriangle, v2),                 24);
@@ -491,7 +530,9 @@ mod tests {
         assert_eq!(offset_of!(BvhTriangle, uv0),                88);
         assert_eq!(offset_of!(BvhTriangle, uv1),                96);
         assert_eq!(offset_of!(BvhTriangle, uv2),               104);
-        assert_eq!(offset_of!(BvhTriangle, _pad),              112);
+        assert_eq!(offset_of!(BvhTriangle, t0),                112);
+        assert_eq!(offset_of!(BvhTriangle, t1),                128);
+        assert_eq!(offset_of!(BvhTriangle, t2),                144);
         let _: &[u8] = bytemuck::bytes_of(&BvhTriangle::zeroed());
     }
 
