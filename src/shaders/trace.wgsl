@@ -898,17 +898,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // sample clamping: cap the per-sample luminance so no single sample can
     // dominate the running average.
     //
-    // Why 20? The ACES tone-mapper maps linear 20 to ~0.99 display brightness;
-    // linear 5 maps to ~0.96. Values above 20 are visually indistinguishable
-    // from white, so clamping there loses no perceptible information. A direct
-    // sun highlight through the GGX BRDF (SUN_RADIANCE = 10, BRDF peak ≈ 1)
-    // stays comfortably under 20, so legitimate bright specular pixels are
-    // unaffected. Only IBL sun hits (typically 500–5000+) get pulled down.
+    // The threshold must be chosen relative to the ACES tonemapper's saturation
+    // point, not some arbitrary linear value. ACES maps linear ≥ 10 to 1.0
+    // (saturated white), so a clamp at 20 still produces a full-white pixel on
+    // the first sample — the pixel only fades to normal after ~100 accumulated
+    // samples, which is nowhere near fast enough to prevent visible fireflies.
+    //
+    // A threshold of 3 means:
+    //   - sample 1 with a sun hit: 3 → ACES → 0.95 (bright, but not full white)
+    //   - sample 5 without further hit: 3/5 = 0.6 → ACES → 0.72 (normal looking)
+    // So fireflies converge in ~5 samples instead of ~100. The cost is that the
+    // absolute peak of a very smooth specular highlight gets biased slightly
+    // downward — but since ACES(3) = 0.95 and ACES(∞) = 1.0, both look like
+    // "bright shiny surface" on screen, and no one can tell the difference.
     //
     // The clamp is applied to the luminance so the hue of bright samples is
     // preserved — we scale all channels equally rather than clamping per-channel.
     let sample_lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
-    let FIREFLY_CLAMP = 20.0;
+    let FIREFLY_CLAMP = 3.0;
     if sample_lum > FIREFLY_CLAMP {
         radiance *= FIREFLY_CLAMP / sample_lum;
     }
