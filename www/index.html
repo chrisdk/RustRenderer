@@ -132,7 +132,7 @@
 
         /* ── Load file ─────────────────────────────────────────────────────── */
 
-        #load-btn {
+        #load-btn, #load-env-btn {
             display: block;
             text-align: center;
             color: rgba(255,255,255,0.35);
@@ -142,9 +142,9 @@
             border-radius: 4px;
             transition: color 0.12s;
         }
-        #load-btn:hover { color: rgba(255,255,255,0.65); }
+        #load-btn:hover, #load-env-btn:hover { color: rgba(255,255,255,0.65); }
 
-        #file-input { display: none; }
+        #file-input, #env-file-input { display: none; }
 
         /* ── Canvas area (right side) ──────────────────────────────────────── */
 
@@ -225,6 +225,9 @@
 
         <label id="load-btn" for="file-input">Load GLB / GLTF…</label>
         <input id="file-input" type="file" accept=".gltf,.glb">
+
+        <label id="load-env-btn" for="env-file-input">Load HDR environment…</label>
+        <input id="env-file-input" type="file" accept=".hdr">
     </div>
 
     <div id="canvas-wrap">
@@ -232,7 +235,7 @@
 
         <div id="hints">Drag to spin</div>
 
-        <div id="drop-overlay">Drop GLTF / GLB here</div>
+        <div id="drop-overlay">Drop GLTF / GLB or HDR here</div>
     </div>
 
     <script type="module" src="dist/index.js"></script>

@@ -12,6 +12,7 @@
 import init, {
     init_renderer,
     load_scene,
+    load_environment,
     update_camera,
     render,
     get_pixels,
@@ -25,14 +26,15 @@ import { BUILTIN_SCENES } from './scenes.js';
 // DOM references
 // ─────────────────────────────────────────────────────────────────────────────
 
-const canvas      = document.getElementById('canvas')      as HTMLCanvasElement;
+const canvas      = document.getElementById('canvas')        as HTMLCanvasElement;
 const ctx         = canvas.getContext('2d')!;
 const statusEl    = document.getElementById('status')!;
-const fileInput   = document.getElementById('file-input')  as HTMLInputElement;
+const fileInput   = document.getElementById('file-input')    as HTMLInputElement;
+const envInput    = document.getElementById('env-file-input') as HTMLInputElement;
 const hintsEl     = document.getElementById('hints')!;
 const dropOverlay = document.getElementById('drop-overlay')!;
 const scenePicker = document.getElementById('scene-picker')!;
-const renderBtn   = document.getElementById('render-btn')  as HTMLButtonElement;
+const renderBtn   = document.getElementById('render-btn')    as HTMLButtonElement;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Turntable camera state
@@ -260,6 +262,23 @@ async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
     }
 }
 
+/**
+ * Decodes and uploads a Radiance HDR (.hdr) environment map.
+ *
+ * Once loaded, the path tracer uses it for background, ambient, and
+ * reflections instead of the procedural sky gradient. The rasterizer
+ * preview is unaffected — it continues using its baked sky colours.
+ */
+async function loadEnvironmentBytes(bytes: Uint8Array): Promise<void> {
+    setStatus('Loading environment…');
+    try {
+        load_environment(bytes);
+        setStatus('Environment loaded · click Render to apply IBL');
+    } catch (err) {
+        setStatus(`Environment error: ${err}`);
+    }
+}
+
 // ── High-quality render ───────────────────────────────────────────────────────
 
 /**
@@ -360,6 +379,13 @@ fileInput.addEventListener('change', async () => {
     await loadSceneBytes(new Uint8Array(buffer));
 });
 
+envInput.addEventListener('change', async () => {
+    const file = envInput.files?.[0];
+    if (!file) return;
+    const buffer = await file.arrayBuffer();
+    await loadEnvironmentBytes(new Uint8Array(buffer));
+});
+
 // ── Drag-and-drop ────────────────────────────────────────────────────────────
 
 window.addEventListener('dragenter', e => {
@@ -380,7 +406,12 @@ window.addEventListener('drop', async e => {
     const file = e.dataTransfer?.files[0];
     if (!file) return;
     const buffer = await file.arrayBuffer();
-    await loadSceneBytes(new Uint8Array(buffer));
+    // Route by file extension: .hdr → environment map; anything else → scene.
+    if (file.name.toLowerCase().endsWith('.hdr')) {
+        await loadEnvironmentBytes(new Uint8Array(buffer));
+    } else {
+        await loadSceneBytes(new Uint8Array(buffer));
+    }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

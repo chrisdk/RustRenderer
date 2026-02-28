@@ -148,6 +148,35 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
     })
 }
 
+/// Loads an HDR environment map from raw `.hdr` (Radiance RGBE) bytes.
+///
+/// The environment map is used by the path tracer for background sky colour,
+/// ambient lighting, and reflections in metallic surfaces. Call this after
+/// `init_renderer`. Can be called again to swap environments without reloading
+/// the scene.
+///
+/// The rasteriser continues to use its procedural sky gradient; this only
+/// affects the path-traced output from the "Render" button.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
+    use crate::scene::environment::decode_hdr;
+
+    let img = decode_hdr(bytes)
+        .map_err(|e| JsValue::from_str(&e))?;
+
+    STATE.with(|s| {
+        let mut guard = s.borrow_mut();
+        let state = guard
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("call init_renderer() first"))?;
+
+        state.renderer.upload_environment(img.width, img.height, img.pixels);
+        log::info!("environment loaded: {}×{}", img.width, img.height);
+        Ok(())
+    })
+}
+
 /// Returns the world-space axis-aligned bounding box of the loaded scene as a
 /// `Float32Array` of six values: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
 ///

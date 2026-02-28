@@ -41,9 +41,10 @@ use crate::scene::texture::Texture;
 // Supporting types
 // ============================================================================
 
-/// Per-frame shader constants: output dimensions, sample index, and render flags.
+/// Per-frame shader constants: output dimensions, sample index, render flags,
+/// and environment map info.
 ///
-/// Must be 16-byte aligned for a WGSL uniform buffer.
+/// 32 bytes (two 16-byte rows), matching the WGSL `FrameUniforms` struct exactly.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct FrameUniforms {
@@ -53,6 +54,13 @@ pub struct FrameUniforms {
     /// Bit flags passed to the shader.
     /// Bit 0: preview mode — cap bounce count to 2 for fast interactive rendering.
     pub flags:        u32,
+    /// Width of the loaded environment map in pixels; 0 when none is loaded.
+    /// The shader treats env_width == 0 as "no env map, use procedural sky".
+    pub env_width:    u32,
+    /// Height of the loaded environment map in pixels; 0 when none is loaded.
+    pub env_height:   u32,
+    pub _pad0:        u32,
+    pub _pad1:        u32,
 }
 
 /// Per-texture metadata uploaded to the GPU alongside the flat pixel data.
@@ -90,6 +98,16 @@ pub struct Renderer {
     pub(crate) tex_data_buf:  Option<wgpu::Buffer>,
     /// Per-texture metadata: pixel offset into `tex_data_buf`, width, height.
     pub(crate) tex_info_buf:  Option<wgpu::Buffer>,
+
+    // ── Environment map (always valid; 1-pixel black dummy when not loaded) ──
+    /// Linear-light RGB32F environment map pixels as `vec4<f32>` (A unused).
+    /// Contains a 1×1 black pixel before any env map is loaded; replaced by
+    /// `upload_environment`. Always valid so the bind group layout is fixed.
+    pub(crate) env_pixels_buf: wgpu::Buffer,
+    /// Dimensions of the loaded env map; (0, 0) when using the dummy.
+    /// Passed to the shader in `FrameUniforms`; zero width triggers the
+    /// procedural sky fallback.
+    pub(crate) env_dims: (u32, u32),
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
@@ -158,22 +176,33 @@ impl Renderer {
             .await
             .map_err(|e| format!("GPU device creation failed: {e}"))?;
 
+        // A 1-pixel black env map dummy keeps the GPU binding slot valid
+        // before any real environment is loaded.
+        use wgpu::util::DeviceExt;
+        let env_pixels_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_pixels_dummy"),
+            contents: bytemuck::cast_slice(&[0.0f32; 4]),  // one vec4<f32>(0,0,0,1)
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         Ok(Self {
             device,
             queue,
-            bvh_nodes_buf: None,
-            bvh_tris_buf:  None,
-            materials_buf: None,
-            tex_data_buf:  None,
-            tex_info_buf:  None,
-            camera_buf:    None,
-            frame_buf:     None,
-            output_buf:    None,
-            accum_buf:     None,
-            output_dims:   (0, 0),
-            scene_bgl:     None,
-            frame_bgl:     None,
-            pipeline:      None,
+            bvh_nodes_buf:  None,
+            bvh_tris_buf:   None,
+            materials_buf:  None,
+            tex_data_buf:   None,
+            tex_info_buf:   None,
+            env_pixels_buf,
+            env_dims:       (0, 0),
+            camera_buf:     None,
+            frame_buf:      None,
+            output_buf:     None,
+            accum_buf:      None,
+            output_dims:    (0, 0),
+            scene_bgl:      None,
+            frame_bgl:      None,
+            pipeline:       None,
         })
     }
 }
@@ -280,6 +309,27 @@ impl Renderer {
         log::debug!("camera uploaded: pos={:?}", uniform.position);
     }
 
+    /// Uploads a decoded HDR environment map to the GPU.
+    ///
+    /// `pixels` must be `width * height * 4` f32 values in row-major order,
+    /// laid out as `[R, G, B, 1.0]` per pixel (vec4 with padding). See
+    /// `scene::environment::decode_hdr` for the producer.
+    ///
+    /// After this call the next `render_frame` will use the env map for the
+    /// background and ambient lighting. Can be called multiple times to swap
+    /// environments; the old buffer is dropped automatically.
+    pub fn upload_environment(&mut self, width: u32, height: u32, pixels: Vec<f32>) {
+        use wgpu::util::DeviceExt;
+        self.env_pixels_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_pixels"),
+            contents: bytemuck::cast_slice(&pixels),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.env_dims = (width, height);
+        log::info!("env map uploaded: {}×{} ({} MB)", width, height,
+            pixels.len() * 4 / 1_000_000);
+    }
+
     /// Returns `true` once [`upload_scene`] has been called.
     pub fn is_scene_loaded(&self) -> bool {
         self.bvh_nodes_buf.is_some()
@@ -301,7 +351,7 @@ impl Renderer {
         });
 
         // ── Bind group layouts ───────────────────────────────────────────────
-        // Group 0: scene data — five read-only storage buffers.
+        // Group 0: scene data — six read-only storage buffers.
         let scene_bgl = self.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 label: Some("scene_bgl"),
@@ -309,8 +359,9 @@ impl Renderer {
                     storage_ro(0), // bvh_nodes
                     storage_ro(1), // bvh_tris
                     storage_ro(2), // materials
-                    storage_ro(3), // tex_data  (flat RGBA8 pixel data)
-                    storage_ro(4), // tex_info  (per-texture offset/size)
+                    storage_ro(3), // tex_data     (flat RGBA8 pixel data)
+                    storage_ro(4), // tex_info     (per-texture offset/size)
+                    storage_ro(5), // env_pixels   (HDR env map as vec4<f32>)
                 ],
             }
         );
@@ -442,7 +493,12 @@ impl Renderer {
 
         // Upload frame uniforms.
         let flags = if preview { 1u32 } else { 0u32 };
-        let frame_data = FrameUniforms { width, height, sample_index, flags };
+        let frame_data = FrameUniforms {
+            width, height, sample_index, flags,
+            env_width:  self.env_dims.0,
+            env_height: self.env_dims.1,
+            _pad0: 0, _pad1: 0,
+        };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
             None => {
@@ -467,6 +523,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: self.materials_buf.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.tex_data_buf.as_ref().unwrap().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: self.tex_info_buf.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.env_pixels_buf.as_entire_binding() },
             ],
         });
 

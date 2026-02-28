@@ -120,23 +120,32 @@ struct Camera {
     up_scaled:  vec3<f32>, _pad3: f32,
 }
 
-// Matches renderer::gpu::FrameUniforms (16 bytes).
+// Matches renderer::gpu::FrameUniforms (32 bytes).
 struct FrameUniforms {
     width:        u32,
     height:       u32,
     sample_index: u32,
     flags:        u32,  // bit 0: preview mode (cap bounces to PREVIEW_BOUNCES)
+    // Environment map dimensions. Both zero when no env map is loaded, which
+    // causes sky_color() to fall back to the procedural gradient.
+    env_width:    u32,
+    env_height:   u32,
+    _pad0:        u32,
+    _pad1:        u32,
 }
 
 // ============================================================================
 // Bindings
 // ============================================================================
 
-@group(0) @binding(0) var<storage, read>       bvh_nodes: array<BvhNode>;
-@group(0) @binding(1) var<storage, read>       bvh_tris:  array<BvhTriangle>;
-@group(0) @binding(2) var<storage, read>       materials: array<Material>;
-@group(0) @binding(3) var<storage, read>       tex_data:  array<u32>;
-@group(0) @binding(4) var<storage, read>       tex_info:  array<TexInfo>;
+@group(0) @binding(0) var<storage, read>       bvh_nodes:  array<BvhNode>;
+@group(0) @binding(1) var<storage, read>       bvh_tris:   array<BvhTriangle>;
+@group(0) @binding(2) var<storage, read>       materials:  array<Material>;
+@group(0) @binding(3) var<storage, read>       tex_data:   array<u32>;
+@group(0) @binding(4) var<storage, read>       tex_info:   array<TexInfo>;
+/// HDR environment map pixels as linear-light vec4<f32> (A component unused).
+/// Row-major, frame.env_width × frame.env_height. One black pixel when not loaded.
+@group(0) @binding(5) var<storage, read>       env_pixels: array<vec4<f32>>;
 
 @group(1) @binding(0) var<uniform>             camera:  Camera;
 @group(1) @binding(1) var<uniform>             frame:   FrameUniforms;
@@ -472,14 +481,41 @@ fn traverse_bvh(
 // Sky and environment
 // ============================================================================
 
-// Procedural sky: horizon-to-zenith gradient for rays that escape the scene.
+// ============================================================================
+// Sky / environment
+// ============================================================================
+
+// Samples the HDR environment map using an equirectangular (lat-long) mapping.
 //
-// The sun is intentionally absent here. Direct sun lighting is handled by
-// Next Event Estimation (an explicit shadow ray toward SUN_DIR at every
-// opaque surface hit), which eliminates the need to stochastically find the
-// sun disk and reduces variance by orders of magnitude. Keeping the sun here
-// would double-count its contribution on every bounce.
+// Standard convention used by Poly Haven and most HDRI tools:
+//   longitude = atan2(dir.x, -dir.z)  →  U = 0.5 at -Z (camera forward)
+//   latitude  = asin(dir.y)           →  V = 0 at top (+Y), 1 at bottom (-Y)
+fn sample_env(dir: vec3<f32>) -> vec3<f32> {
+    let phi   = atan2(dir.x, -dir.z);                   // [-π, π]
+    let theta = asin(clamp(dir.y, -0.9999, 0.9999));    // [-π/2, π/2]
+
+    let u = phi   / TWO_PI + 0.5;           // [0, 1]
+    let v = 0.5   - theta  / PI;            // [0, 1], 0 = top
+
+    let px = min(u32(u * f32(frame.env_width)),  frame.env_width  - 1u);
+    let py = min(u32(v * f32(frame.env_height)), frame.env_height - 1u);
+    return env_pixels[py * frame.env_width + px].rgb;
+}
+
+// Returns the radiance for a ray that escaped the scene without hitting
+// any geometry.
+//
+// When an HDR environment map is loaded (env_width > 0) it is sampled
+// directly — this gives physically-based ambient lighting, correct
+// coloured reflections in metals, and a background that matches the IBL.
+//
+// Without an env map the procedural gradient is used as a fallback.
+// The sun is handled exclusively by NEE (see main path loop) so it does
+// not appear here regardless of which sky path is taken.
 fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+    if frame.env_width > 0u {
+        return sample_env(dir);
+    }
     let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     return mix(SKY_HORIZON, SKY_ZENITH, t);
 }
