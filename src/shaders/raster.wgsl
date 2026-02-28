@@ -289,12 +289,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // sky and surfaces facing down get warm ground — much more convincing than
     // a flat constant, at no extra texture lookups.
     //
+    // Metals have no diffuse response at all — their reflectance is handled
+    // entirely through the specular/Fresnel term. Multiplying by (1-metallic)
+    // zeros out the ambient for fully metallic surfaces, so a dark metallic
+    // dome stays dark rather than picking up a flat sky-coloured glow.
+    //
     // Occlusion texture (R channel): 0 = fully occluded, 1 = fully exposed.
     // Multiplying ambient by this value darkens crevices and cavities where
     // indirect light cannot easily reach. Only ambient is affected — direct
     // sun light is not occluded by this baked term.
     let occlusion = sample_tex(mat.occlusion_texture, uv).r;
-    let ambient = albedo * sky_ambient(N) * occlusion;
+    let ambient = albedo * sky_ambient(N) * (1.0 - metallic) * occlusion;
 
     // ---- Emissive ----
     let emissive = mat.emissive * emit_samp;
@@ -306,10 +311,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var color = (diffuse + specular + ambient + emissive) * opacity;
 
-    // Reinhard tonemap + sRGB gamma encode. The output texture is Rgba8Unorm
-    // (linear storage), so we manually apply gamma here.
-    color = color / (color + vec3<f32>(1.0));
-    color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    // ACES filmic tonemap + sRGB gamma encode. ACES has an S-curve that keeps
+    // darks dark and punches midtones, giving richer, more saturated output
+    // than Reinhard. Matches the tonemapper used by the path tracer.
+    // (Narkowicz 2015 fit: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/)
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    color = clamp((color * (a * color + b)) / (color * (c * color + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+    color = pow(color, vec3<f32>(1.0 / 2.2));
 
     return vec4<f32>(color, 1.0);
 }
