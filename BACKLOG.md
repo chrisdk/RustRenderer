@@ -8,6 +8,7 @@ and when items are completed (remove them and update README + CLAUDE.md).
 
 ## Interface Features
 
+- **Control panel restructure: vertical tabs** — the current left panel is a flat list that will get cluttered as controls accumulate. Restructure it into vertical tabs (e.g., Scene, Camera, Render, Environment) so each group of related controls has its own pane. Needs design thought before implementation: what tabs make sense, what goes in each, and how the tab bar behaves at different panel heights.
 - **Adjustable sample count** — let the user choose render quality (e.g., 32 / 128 / 512 spp) instead of the hard-coded 256. A fast "preview quality" option would be useful for large canvases.
 - **Save rendered image** — "Save PNG" button that exports the current canvas contents via `canvas.toBlob()`. Trivial to implement, high user value.
 - **Camera FOV slider** — expose the vertical field of view so the user can switch between telephoto (narrow) and wide-angle looks without editing code.
