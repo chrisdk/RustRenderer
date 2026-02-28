@@ -41,6 +41,10 @@ const envBgToggle   = document.getElementById('env-bg-toggle')  as HTMLInputElem
 const hintsEl       = document.getElementById('hints')!;
 const dropOverlay   = document.getElementById('drop-overlay')!;
 const renderBtn     = document.getElementById('render-btn')     as HTMLButtonElement;
+const saveBtn       = document.getElementById('save-btn')       as HTMLButtonElement;
+const resetCamBtn   = document.getElementById('reset-cam-btn')  as HTMLButtonElement;
+const kbdHelpBtn    = document.getElementById('kbd-help-btn')   as HTMLButtonElement;
+const kbdOverlay    = document.getElementById('kbd-overlay')!;
 const sceneSelect   = document.getElementById('scene-select')   as HTMLSelectElement;
 const sceneAttrib   = document.getElementById('scene-attribution')!;
 const envSelect     = document.getElementById('env-select')     as HTMLSelectElement;
@@ -55,6 +59,10 @@ const turntable = new Turntable();
 const VFOV       = Math.PI / 3;   // 60° vertical field of view
 const DRAG_SPEED = 0.005;         // radians of rotation per pixel dragged
 const ZOOM_SPEED = 0.002;         // exponential zoom rate per scroll pixel
+
+// The most recently loaded scene bounds, kept so the camera-reset button and
+// the F shortcut can re-run autoFrame without reloading the scene.
+let lastBounds: Float32Array | null = null;
 
 /**
  * Uploads the current turntable state to the GPU and marks the camera dirty
@@ -84,9 +92,12 @@ const ctrl = new RenderController({
     getCanvasSize: () => ({ w: canvas.width || 1, h: canvas.height || 1 }),
     setStatus,
     onSceneLoaded: (bounds) => {
+        lastBounds = bounds;
         turntable.autoFrame(bounds, VFOV);
         applyTurntable();
-        renderBtn.disabled = false;
+        renderBtn.disabled   = false;
+        saveBtn.disabled     = false;
+        resetCamBtn.disabled = false;
         fadeHints();
     },
     lockCamera: (w, h) => {
@@ -449,6 +460,121 @@ envBgToggle.addEventListener('change', () => {
 sampleCount.addEventListener('change', () => {
     ctrl.hqSamples = parseInt(sampleCount.value, 10);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Save PNG
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Exports the current canvas contents as a PNG download.
+ *
+ * `canvas.toBlob` is asynchronous (the browser encodes in the background) so
+ * we create a temporary object URL and click a synthetic <a> to trigger the
+ * browser's native Save dialog. The URL is revoked immediately after the click
+ * so the Blob is eligible for GC.
+ */
+function savePng(): void {
+    canvas.toBlob(blob => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a   = document.createElement('a');
+        a.href     = url;
+        a.download = 'render.png';
+        a.click();
+        URL.revokeObjectURL(url);
+    }, 'image/png');
+}
+
+saveBtn.addEventListener('click', savePng);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Camera reset
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the camera to the default framing for the current scene.
+ *
+ * Uses the stored scene bounds from the last `onSceneLoaded` callback so we
+ * don't need to round-trip to the GPU just to get the AABB again.
+ */
+function resetCamera(): void {
+    if (!lastBounds) return;
+    ctrl.cancelHighQualityRender();
+    turntable.autoFrame(lastBounds, VFOV);
+    applyTurntable();
+}
+
+resetCamBtn.addEventListener('click', resetCamera);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboard shortcuts
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Zoom factor per keypress — 15 % change, matching a comfortable scroll notch.
+const KB_ZOOM_IN  = 1 / 1.15;   // smaller radius = closer
+const KB_ZOOM_OUT = 1.15;        // larger radius  = farther
+
+window.addEventListener('keydown', e => {
+    // Don't intercept shortcuts when the user is typing in a form element.
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+    switch (e.key) {
+        case 'r':
+        case 'R':
+            if (!ctrl.sceneLoaded) break;
+            if (ctrl.hqRendering) {
+                ctrl.cancelHighQualityRender();
+            } else {
+                ctrl.startHighQualityRender();
+            }
+            break;
+
+        case 'Escape':
+            ctrl.cancelHighQualityRender();
+            break;
+
+        case 'f':
+        case 'F':
+            resetCamera();
+            break;
+
+        // + / = both map to "zoom in" — = is the unshifted key on most layouts.
+        case '+':
+        case '=':
+            if (!ctrl.sceneLoaded) break;
+            turntable.zoom(KB_ZOOM_IN);
+            ctrl.cancelHighQualityRender();
+            applyTurntable();
+            break;
+
+        case '-':
+        case '_':
+            if (!ctrl.sceneLoaded) break;
+            turntable.zoom(KB_ZOOM_OUT);
+            ctrl.cancelHighQualityRender();
+            applyTurntable();
+            break;
+
+        case '?':
+            kbdOverlay.hidden = !kbdOverlay.hidden;
+            break;
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboard help overlay
+// ─────────────────────────────────────────────────────────────────────────────
+
+kbdHelpBtn.addEventListener('click', () => {
+    kbdOverlay.hidden = !kbdOverlay.hidden;
+});
+
+// Clicking anywhere on the canvas dismisses the overlay so it doesn't block
+// the view when the user starts interacting.
+canvas.addEventListener('pointerdown', () => {
+    kbdOverlay.hidden = true;
+}, { capture: true });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UI helpers

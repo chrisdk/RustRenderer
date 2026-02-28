@@ -8,11 +8,8 @@ and when items are completed (remove them and update README + CLAUDE.md).
 
 ## Interface Features
 
-- **Save rendered image** — "Save PNG" button that exports the current canvas contents via `canvas.toBlob()`. Trivial to implement, high user value.
 - **Camera FOV slider** — expose the vertical field of view so the user can switch between telephoto (narrow) and wide-angle looks without editing code.
 - **Orbit pan mode** — hold Shift while dragging to translate the orbit target instead of rotating around it, so the user can reframe without zooming.
-- **Camera reset button** — one click to re-run `autoFrame()` and return to the scene's default view.
-- **Keyboard shortcuts** — R to start/cancel render, Escape to cancel, F to auto-frame, +/- for zoom. Show shortcuts in a help overlay.
 - **Render region** — drag a rectangle on the canvas to path-trace only that region at full resolution; useful for examining a specific detail without a full-frame render.
 - **Scene info panel** — show triangle count, mesh count, material count, and canvas resolution after a scene loads. Helps users understand what they've loaded.
 - **Full-screen / maximise** — expand the canvas to fill the browser window with a single click.

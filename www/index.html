@@ -249,13 +249,90 @@
             background: #fff;
         }
 
-        /* ── Camera tab ──────────────────────────────────────────────────────── */
+        /* ── Secondary (ghost) button — Save PNG, Reset camera ─────────────── */
 
-        .placeholder-text {
+        .secondary-btn {
+            width: 100%;
+            text-align: center;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 6px;
+            color: rgba(255,255,255,0.45);
+            cursor: pointer;
             font-size: 12px;
+            font-weight: 500;
+            padding: 7px 10px;
+            transition: background 0.12s, color 0.12s;
+        }
+        .secondary-btn:hover    { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.75); }
+        .secondary-btn:disabled { opacity: 0.30; cursor: default; }
+
+        /* ── Keyboard help button (floating ? in canvas corner) ─────────────── */
+
+        #kbd-help-btn {
+            position: absolute;
+            bottom: 14px;
+            right: 14px;
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            background: rgba(0,0,0,0.55);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: rgba(255,255,255,0.50);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 700;
+            line-height: 1;
+            backdrop-filter: blur(4px);
+            transition: background 0.12s, color 0.12s;
+            z-index: 10;
+        }
+        #kbd-help-btn:hover { background: rgba(0,0,0,0.75); color: rgba(255,255,255,0.85); }
+
+        /* ── Keyboard shortcut overlay ───────────────────────────────────────── */
+
+        #kbd-overlay {
+            position: absolute;
+            bottom: 48px;
+            right: 14px;
+            background: rgba(10,10,10,0.85);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            padding: 10px 14px;
+            backdrop-filter: blur(8px);
+            z-index: 10;
+            min-width: 220px;
+        }
+        #kbd-overlay[hidden] { display: none; }
+        .kbd-title {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.10em;
+            text-transform: uppercase;
             color: rgba(255,255,255,0.28);
-            font-style: italic;
-            padding: 4px 2px;
+            margin-bottom: 7px;
+        }
+        .kbd-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 3px 0;
+            font-size: 12px;
+            color: rgba(255,255,255,0.65);
+        }
+        kbd {
+            display: inline-block;
+            background: rgba(255,255,255,0.10);
+            border: 1px solid rgba(255,255,255,0.20);
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-family: system-ui, sans-serif;
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(255,255,255,0.85);
+            min-width: 32px;
+            text-align: center;
+            white-space: nowrap;
         }
 
         /* ── Canvas area (right side) ────────────────────────────────────────── */
@@ -321,6 +398,7 @@
             <div id="panel-title">Path Tracer</div>
             <div id="status">Initializing…</div>
             <button id="render-btn" disabled>Render</button>
+            <button id="save-btn" class="secondary-btn" disabled>Save PNG</button>
         </div>
 
         <!-- Tab bar (vertical labels) + scrollable pane content. -->
@@ -378,9 +456,10 @@
                     </select>
                 </div>
 
-                <!-- Camera tab: placeholder for future controls -->
+                <!-- Camera tab: reset and output controls -->
                 <div class="tab-pane" id="tab-camera">
-                    <p class="placeholder-text">Camera controls — coming soon.</p>
+                    <div class="ctrl-label">View</div>
+                    <button id="reset-cam-btn" class="secondary-btn" disabled>Reset camera</button>
                 </div>
             </div>
         </div>
@@ -389,9 +468,20 @@
     <div id="canvas-wrap">
         <canvas id="canvas"></canvas>
 
-        <div id="hints">Drag to spin · scroll to zoom</div>
+        <div id="hints">Drag to spin · scroll to zoom · press ? for shortcuts</div>
 
         <div id="drop-overlay">Drop GLTF / GLB or HDR here</div>
+
+        <!-- Floating keyboard-shortcut help -->
+        <button id="kbd-help-btn" title="Keyboard shortcuts">?</button>
+        <div id="kbd-overlay" hidden>
+            <div class="kbd-title">Keyboard shortcuts</div>
+            <div class="kbd-row"><kbd>R</kbd><span>Start / cancel render</span></div>
+            <div class="kbd-row"><kbd>Esc</kbd><span>Cancel render</span></div>
+            <div class="kbd-row"><kbd>F</kbd><span>Auto-frame camera</span></div>
+            <div class="kbd-row"><kbd>+</kbd><span>Zoom in</span></div>
+            <div class="kbd-row"><kbd>−</kbd><span>Zoom out</span></div>
+        </div>
     </div>
 
     <script type="module" src="dist/index.js"></script>
