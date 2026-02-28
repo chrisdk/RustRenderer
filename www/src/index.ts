@@ -22,6 +22,7 @@ import init, {
     get_scene_bounds,
 } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
+import { Turntable } from './turntable.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM references
@@ -39,92 +40,25 @@ const scenePicker = document.getElementById('scene-picker')!;
 const renderBtn   = document.getElementById('render-btn')    as HTMLButtonElement;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Turntable camera state
+// Turntable camera
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Turntable camera: the scene rotates in front of a stationary camera.
- *
- * Mechanically we move the camera on a sphere whose centre is `target` (the
- * scene's world-space centre) and whose radius is `radius`. This produces
- * pixels identical to spinning the object itself, at a fraction of the
- * complexity — the GPU scene geometry never moves.
- *
- * Angles:
- *   azimuth  — horizontal rotation in radians (0 = camera at +Z, looking −Z)
- *   elevation — vertical tilt in radians (positive = camera above the equator)
- *
- * Drag convention (turntable, not "fly-around"):
- *   drag right → azimuth increases → right face of object becomes visible
- *   drag up    → elevation increases → top of object tilts toward you
- */
-const turntable = {
-    target:    [0, 0, 0] as [number, number, number],
-    azimuth:   0,
-    elevation: 0.25,   // ~14° above horizontal — slightly elevated start looks best
-    radius:    5,
-};
+const turntable = new Turntable();
 
-const VFOV      = Math.PI / 3;           // 60° vertical field of view
-const DRAG_SPEED = 0.005;               // radians of rotation per pixel dragged
-const EL_MAX    = Math.PI / 2 - 0.05;   // elevation clamp — prevents camera flip
-
-/**
- * Converts the current turntable state to the camera parameters the WASM API
- * expects, without touching any rendering state.
- *
- * The mapping from spherical (azimuth, elevation, radius) to Cartesian is:
- *
- *   position = target + r * (sin(az)*cos(el),  sin(el),  cos(az)*cos(el))
- *   yaw      = −az      (camera looks toward target, not away from it)
- *   pitch    = −el
- *
- * The sign flip comes from the FPS forward-vector formula:
- *   fwd = (sin(yaw)*cos(pitch), sin(pitch), −cos(yaw)*cos(pitch))
- * Setting yaw=−az, pitch=−el makes fwd point from position toward target.
- */
-function turntableCameraParams(): { px: number; py: number; pz: number; yaw: number; pitch: number } {
-    const { target: [tx, ty, tz], azimuth: az, elevation: el, radius: r } = turntable;
-    const cosEl = Math.cos(el);
-    return {
-        px: tx + r * Math.sin(az) * cosEl,
-        py: ty + r * Math.sin(el),
-        pz: tz + r * Math.cos(az) * cosEl,
-        yaw:   -az,
-        pitch: -el,
-    };
-}
+const VFOV       = Math.PI / 3;   // 60° vertical field of view
+const DRAG_SPEED = 0.005;         // radians of rotation per pixel dragged
+const ZOOM_SPEED = 0.002;         // exponential zoom rate per scroll pixel
 
 /**
  * Uploads the current turntable state to the GPU and marks the camera dirty
- * so the render loop draws a fresh frame.
+ * so the render loop draws a fresh raster frame.
  */
 function applyTurntable(): void {
-    const { px, py, pz, yaw, pitch } = turntableCameraParams();
+    const { px, py, pz, yaw, pitch } = turntable.toCameraParams();
     const w = canvas.width  || 1;
     const h = canvas.height || 1;
     update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
     cameraDirty = true;
-}
-
-/**
- * Position the camera so the loaded scene fills roughly 80% of the viewport
- * in its largest on-screen dimension.
- *
- * The radius is set to 75% of the bounding-box diagonal, which equals 1.5×
- * the scene's circumscribed sphere radius — so the camera is always safely
- * outside the model regardless of orientation.
- */
-function applyAutoCamera(): void {
-    const b = get_scene_bounds();
-    if (b.length < 6) return;
-
-    turntable.target    = [(b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2];
-    turntable.azimuth   = 0;
-    turntable.elevation = 0.25;
-
-    const dx = b[3] - b[0], dy = b[4] - b[1], dz = b[5] - b[2];
-    turntable.radius = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz) * 1.0, 0.1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -153,11 +87,7 @@ canvas.addEventListener('pointermove', e => {
     lastX = e.clientX;
     lastY = e.clientY;
 
-    turntable.azimuth   -= dx * DRAG_SPEED;
-    turntable.elevation  = Math.max(-EL_MAX,
-                           Math.min( EL_MAX,
-                           turntable.elevation + dy * DRAG_SPEED));
-
+    turntable.pan(-dx * DRAG_SPEED, dy * DRAG_SPEED);
     applyTurntable();
 });
 
@@ -172,13 +102,6 @@ function endDrag(): void {
 // ─────────────────────────────────────────────────────────────────────────────
 // Scroll / pinch zoom
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Exponent multiplier in `radius *= exp(deltaY * ZOOM_SPEED)`.
-// At 0.002 a single mouse-wheel notch (deltaY ≈ 100 px) zooms ~18%;
-// a touchpad pinch event (deltaY ≈ 5 px) moves ~1% — smooth and
-// proportional at any scale.
-const ZOOM_SPEED  = 0.002;
-const MIN_RADIUS  = 0.01;   // don't let the camera fly inside the model
 
 canvas.addEventListener('wheel', e => {
     if (!sceneLoaded) return;
@@ -195,14 +118,11 @@ canvas.addEventListener('wheel', e => {
     if (e.deltaMode === 1 /* DOM_DELTA_LINE */) delta *= 16;
     if (e.deltaMode === 2 /* DOM_DELTA_PAGE */) delta *= 400;
 
-    // Exponential zoom keeps feel consistent regardless of current distance:
-    // the same scroll moves 18% of whatever the current radius is, so you
-    // never overshoot when close or crawl when far away.
-    //
-    // Sign convention (consistent for both mouse and touchpad):
-    //   deltaY < 0  →  scroll up / pinch open  →  radius shrinks  →  zoom in
-    //   deltaY > 0  →  scroll down / pinch in  →  radius grows    →  zoom out
-    turntable.radius = Math.max(MIN_RADIUS, turntable.radius * Math.exp(delta * ZOOM_SPEED));
+    // Exponential zoom: equal up/down scrolls cancel exactly; feel is
+    // proportional at any distance.
+    //   deltaY < 0  →  scroll up / pinch open  →  zoom in
+    //   deltaY > 0  →  scroll down / pinch in  →  zoom out
+    turntable.zoom(Math.exp(delta * ZOOM_SPEED));
 
     if (hqRendering) hqCancelled = true;
     applyTurntable();
@@ -301,7 +221,7 @@ async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
     setStatus('Loading scene…');
     try {
         load_scene(bytes);
-        applyAutoCamera();
+        turntable.autoFrame(get_scene_bounds());
         applyTurntable();
         sceneLoaded = true;
         renderBtn.disabled = false;
@@ -350,10 +270,10 @@ async function startHighQualityRender(): Promise<void> {
     const w = canvas.width;
     const h = canvas.height;
 
-    // Lock in the current camera for the full render. Use turntableCameraParams()
+    // Lock in the current camera for the full render. Use toCameraParams()
     // rather than applyTurntable() to avoid setting cameraDirty, which would
     // trigger a raster frame on top of the path-traced output.
-    const { px, py, pz, yaw, pitch } = turntableCameraParams();
+    const { px, py, pz, yaw, pitch } = turntable.toCameraParams();
     update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
 
     for (let i = 0; i < HQ_SAMPLES && !hqCancelled; i++) {

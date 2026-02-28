@@ -702,4 +702,50 @@ mod tests {
     }
 
     // GpuTexInfo layout is tested once, authoritatively, in renderer::tests.
+
+    // ── aligned_bytes_per_row ─────────────────────────────────────────────────
+    //
+    // This function is used for every GPU texture readback. A wrong result
+    // produces garbled pixels — rows shifted by padding bytes — with no error
+    // message, just a silently wrong image. Worth pinning down firmly.
+    //
+    // WebGPU requires bytes_per_row to be a multiple of 256
+    // (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT). Each pixel is 4 bytes (RGBA8).
+
+    /// Widths that are already exact multiples of 256 bytes must not be
+    /// rounded up further — that would waste memory and confuse the row-strip
+    /// logic in get_pixels().
+    #[test]
+    fn test_aligned_bytes_per_row_exact_multiples() {
+        assert_eq!(aligned_bytes_per_row(64),  256,  "64×4=256: already aligned");
+        assert_eq!(aligned_bytes_per_row(128), 512,  "128×4=512: already aligned");
+        assert_eq!(aligned_bytes_per_row(256), 1024, "256×4=1024: already aligned");
+        // 1920 (HD width): 1920×4=7680 = 30×256 — exact.
+        assert_eq!(aligned_bytes_per_row(1920), 7680, "1920×4=7680: already aligned");
+    }
+
+    /// Non-aligned widths must round up to the next 256-byte boundary.
+    #[test]
+    fn test_aligned_bytes_per_row_rounds_up() {
+        // 1 pixel → 4 bytes tight → first multiple of 256 above 4.
+        assert_eq!(aligned_bytes_per_row(1),  256, "1 pixel should round up to 256");
+        // 65 pixels → 260 bytes tight → rounds up to 512 (2×256).
+        assert_eq!(aligned_bytes_per_row(65), 512, "65 pixels → 260 bytes → round to 512");
+        // 257 pixels → 1028 bytes tight → rounds up to 1280 (5×256).
+        assert_eq!(aligned_bytes_per_row(257), 1280, "257 pixels → 1028 bytes → round to 1280");
+    }
+
+    /// The aligned row must always be ≥ the tight (unpadded) row; rounding
+    /// must never go the wrong direction.
+    #[test]
+    fn test_aligned_bytes_per_row_never_less_than_tight() {
+        for width in [0u32, 1, 63, 64, 65, 127, 128, 255, 256, 257, 1000, 3840] {
+            let tight    = width * 4;
+            let aligned  = aligned_bytes_per_row(width);
+            assert!(aligned >= tight,
+                "width {width}: aligned {aligned} < tight {tight}");
+            assert_eq!(aligned % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT, 0,
+                "width {width}: aligned {aligned} is not a multiple of 256");
+        }
+    }
 }

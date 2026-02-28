@@ -106,3 +106,134 @@ fn to_rgba8(pixels: &[u8], format: Format, width: u32, height: u32) -> Vec<u8> {
         _ => vec![255u8; n * 4],
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gltf::image::Format;
+
+    /// Helper: convert a single-pixel input and assert the RGBA8 output.
+    fn check_one_pixel(pixels: &[u8], format: Format, expected: [u8; 4]) {
+        let got = to_rgba8(pixels, format, 1, 1);
+        assert_eq!(got.as_slice(), &expected,
+            "{format:?}: expected {expected:?}, got {got:?}");
+    }
+
+    // ── Pass-through ───────────────────────────────────────────────────────
+
+    /// R8G8B8A8 is already in the target format; the bytes must come through
+    /// completely unchanged. Any modification here would corrupt every texture
+    /// that an authoring tool stored in native RGBA8.
+    #[test]
+    fn test_r8g8b8a8_passthrough() {
+        check_one_pixel(&[10, 20, 30, 128], Format::R8G8B8A8, [10, 20, 30, 128]);
+        // Boundary values.
+        check_one_pixel(&[0, 0, 0, 0],       Format::R8G8B8A8, [0, 0, 0, 0]);
+        check_one_pixel(&[255, 255, 255, 255], Format::R8G8B8A8, [255, 255, 255, 255]);
+    }
+
+    // ── 8-bit source formats ───────────────────────────────────────────────
+
+    /// R8G8B8 → RGBA8: alpha must be filled with 255 (fully opaque).
+    #[test]
+    fn test_r8g8b8_adds_opaque_alpha() {
+        check_one_pixel(&[10, 20, 30], Format::R8G8B8, [10, 20, 30, 255]);
+    }
+
+    /// R8G8 (e.g. packed metallic+roughness) → RGBA8: blue must be 0, alpha 255.
+    #[test]
+    fn test_r8g8_pads_blue_and_alpha() {
+        check_one_pixel(&[10, 20], Format::R8G8, [10, 20, 0, 255]);
+    }
+
+    /// R8 (grayscale) → RGBA8: the single value is replicated into R, G, and B.
+    /// A pure-white occlusion map must become (255,255,255,255), not (255,0,0,255).
+    #[test]
+    fn test_r8_replicates_to_grayscale() {
+        check_one_pixel(&[0],   Format::R8, [0,   0,   0,   255]);
+        check_one_pixel(&[128], Format::R8, [128, 128, 128, 255]);
+        check_one_pixel(&[255], Format::R8, [255, 255, 255, 255]);
+    }
+
+    // ── 16-bit source formats (downsampled to 8-bit) ───────────────────────
+    //
+    // 16-bit values are stored little-endian: the low byte comes first, the
+    // high byte second. We keep only the high byte as a fast 8-bit approximation.
+
+    /// R16G16B16A16 → RGBA8: take the high byte of each channel.
+    #[test]
+    fn test_r16g16b16a16_takes_high_bytes() {
+        check_one_pixel(
+            &[0x11, 0xAA,  0x22, 0xBB,  0x33, 0xCC,  0x44, 0xDD],
+            Format::R16G16B16A16,
+            [0xAA, 0xBB, 0xCC, 0xDD],
+        );
+    }
+
+    /// R16G16B16 → RGBA8: high byte of each channel, alpha fixed at 255.
+    #[test]
+    fn test_r16g16b16_takes_high_bytes_adds_alpha() {
+        check_one_pixel(
+            &[0x11, 0xAA,  0x22, 0xBB,  0x33, 0xCC],
+            Format::R16G16B16,
+            [0xAA, 0xBB, 0xCC, 255],
+        );
+    }
+
+    /// R16G16 → RGBA8: high byte of R and G; blue = 0, alpha = 255.
+    #[test]
+    fn test_r16g16_takes_high_bytes_pads_blue() {
+        check_one_pixel(
+            &[0x11, 0xAA,  0x22, 0xBB],
+            Format::R16G16,
+            [0xAA, 0xBB, 0, 255],
+        );
+    }
+
+    /// R16 → RGBA8: high byte replicated into R, G, B; alpha = 255.
+    #[test]
+    fn test_r16_replicates_high_byte_to_grayscale() {
+        check_one_pixel(&[0x11, 0xAA], Format::R16, [0xAA, 0xAA, 0xAA, 255]);
+    }
+
+    // ── Multi-pixel correctness ────────────────────────────────────────────
+    //
+    // Single-pixel tests verify the per-pixel formula; multi-pixel tests
+    // verify that the chunking and output accumulation produce the right
+    // sequence across an entire row.
+
+    /// R8G8B8 over two pixels: ensure alpha is appended after every triplet,
+    /// not just at the end.
+    #[test]
+    fn test_r8g8b8_two_pixels() {
+        let out = to_rgba8(&[10, 20, 30,  40, 50, 60], Format::R8G8B8, 2, 1);
+        assert_eq!(out, vec![10, 20, 30, 255,  40, 50, 60, 255]);
+    }
+
+    /// R8 grayscale over three pixels: each byte must become four output bytes.
+    #[test]
+    fn test_r8_three_pixels() {
+        let out = to_rgba8(&[0, 127, 255], Format::R8, 3, 1);
+        assert_eq!(out, vec![
+            0,   0,   0,   255,
+            127, 127, 127, 255,
+            255, 255, 255, 255,
+        ]);
+    }
+
+    /// R16G16B16A16 over two pixels: verify both pixels are decoded, not just
+    /// the first (guards against an off-by-one in the chunk iterator).
+    #[test]
+    fn test_r16g16b16a16_two_pixels() {
+        let out = to_rgba8(
+            &[0x01, 0xAA, 0x02, 0xBB, 0x03, 0xCC, 0x04, 0xDD,   // pixel 1
+              0x05, 0x11, 0x06, 0x22, 0x07, 0x33, 0x08, 0x44],  // pixel 2
+            Format::R16G16B16A16, 2, 1,
+        );
+        assert_eq!(out, vec![0xAA, 0xBB, 0xCC, 0xDD,  0x11, 0x22, 0x33, 0x44]);
+    }
+}
