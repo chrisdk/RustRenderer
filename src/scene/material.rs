@@ -76,9 +76,11 @@ pub struct Material {
     /// than scattering diffusely, enabling caustics and colour-accurate glass.
     pub transmission: f32,
 
-    /// Padding to reach 64 bytes (required multiple of 16 for WGSL storage
-    /// buffer array elements). Always zero.
-    pub _pad: u32,
+    /// Ambient occlusion texture index. The R channel encodes how much ambient
+    /// light reaches this point: 0.0 = fully occluded (dark crevice), 1.0 =
+    /// fully exposed. Applied as a multiplier on the ambient lighting term.
+    /// -1 means no texture (full ambient everywhere).
+    pub occlusion_texture: i32,
 }
 
 impl Default for Material {
@@ -97,7 +99,7 @@ impl Default for Material {
             emissive_texture:           -1,
             ior:                        1.5,
             transmission:               0.0,
-            _pad:                       0,
+            occlusion_texture:          -1,
         }
     }
 }
@@ -124,7 +126,7 @@ mod tests {
         assert_eq!(offset_of!(Material, emissive_texture),           48);
         assert_eq!(offset_of!(Material, ior),                        52);
         assert_eq!(offset_of!(Material, transmission),               56);
-        assert_eq!(offset_of!(Material, _pad),                       60);
+        assert_eq!(offset_of!(Material, occlusion_texture),          60);
         let _: &[u8] = bytemuck::bytes_of(&Material::zeroed());
     }
 }

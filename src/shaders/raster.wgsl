@@ -62,7 +62,7 @@ struct Material {
     emissive_texture:           i32,         //                      (offset 48)
     ior:                        f32,         //                      (offset 52)
     transmission:               f32,         //                      (offset 56)
-    _pad:                       u32,         //                      (offset 60)
+    occlusion_texture:          i32,         //                      (offset 60)
 }
 
 /// Per-texture metadata. Must match GpuTexInfo in raster.rs (16 bytes).
@@ -288,7 +288,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Use sky colour on the shading normal so surfaces facing upward get blue
     // sky and surfaces facing down get warm ground — much more convincing than
     // a flat constant, at no extra texture lookups.
-    let ambient = albedo * sky_ambient(N);
+    //
+    // Occlusion texture (R channel): 0 = fully occluded, 1 = fully exposed.
+    // Multiplying ambient by this value darkens crevices and cavities where
+    // indirect light cannot easily reach. Only ambient is affected — direct
+    // sun light is not occluded by this baked term.
+    let occlusion = sample_tex(mat.occlusion_texture, uv).r;
+    let ambient = albedo * sky_ambient(N) * occlusion;
 
     // ---- Emissive ----
     let emissive = mat.emissive * emit_samp;

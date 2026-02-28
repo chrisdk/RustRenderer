@@ -85,7 +85,7 @@ struct BvhTriangle {
 //   offset  0 : albedo        (vec4<f32>, 16 bytes)
 //   offset 16 : emissive_r/g/b, metallic  (four f32s)
 //   offset 32 : roughness, albedo_tex, normal_tex, mr_tex  (f32 + three i32s)
-//   offset 48 : emissive_tex, ior, transmission, _pad  (i32 + two f32s + u32)
+//   offset 48 : emissive_tex, ior, transmission, occlusion_tex  (i32 + two f32s + i32)
 struct Material {
     albedo:       vec4<f32>,
     emissive_r:   f32,
@@ -96,10 +96,12 @@ struct Material {
     albedo_tex:   i32,
     normal_tex:   i32,
     mr_tex:       i32,
-    emissive_tex: i32,
-    ior:          f32,
-    transmission: f32,
-    _pad:         u32,
+    emissive_tex:    i32,
+    ior:             f32,
+    transmission:    f32,
+    // Baked ambient occlusion. Not applied here — the path tracer physically
+    // simulates indirect light occlusion through bounce rays.
+    occlusion_tex:   i32,
 }
 
 // Matches renderer::gpu::GpuTextureInfo (16 bytes).

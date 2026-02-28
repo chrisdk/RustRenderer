@@ -131,7 +131,9 @@ impl Scene {
                     ior: mat.ior().unwrap_or(1.5),
                     transmission: mat.transmission()
                         .map_or(0.0, |t| t.transmission_factor()),
-                    _pad: 0,
+                    occlusion_texture: mat.occlusion_texture()
+                        .map(|i| i.texture().source().index() as i32)
+                        .unwrap_or(-1),
                 }
             })
             .collect();
