@@ -488,6 +488,23 @@ async function main(): Promise<void> {
         return;
     }
 
+    // Pre-load the default scene (Damaged Helmet) in the background.
+    // Programmatic .value assignment doesn't fire 'change', so we trigger
+    // the load explicitly and mirror the same pattern as the env map below.
+    const defaultScene = BUILTIN_SCENES[0];
+    sceneSelect.value = defaultScene.name;
+    sceneAttrib.textContent = defaultScene.attribution ?? '';
+    setStatus('Downloading scene…');
+    Promise.resolve(defaultScene.build())
+        .then(glb => ctrl.loadSceneBytes(new Uint8Array(glb), defaultScene.name))
+        .catch(err => {
+            console.warn('Default scene not loaded:', err);
+            // Revert to placeholder so the user knows they need to choose.
+            sceneSelect.value = '';
+            sceneAttrib.textContent = '';
+            setStatus('Choose a scene, or drop a GLTF / GLB file');
+        });
+
     // Kick off the default env map fetch in the background — the renderer
     // is perfectly usable without it; it just falls back to procedural sky.
     // We don't await this so the rest of the UI comes up immediately.
@@ -504,8 +521,6 @@ async function main(): Promise<void> {
             // Revert the dropdown to "Procedural sky" since nothing loaded.
             envSelect.value = '';
         });
-
-    setStatus('Choose a scene, or drop a GLTF / GLB file');
 
     tick();
 }
