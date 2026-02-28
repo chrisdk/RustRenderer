@@ -166,14 +166,9 @@ const PREVIEW_BOUNCES: i32 = 2;
 const RR_START: i32 = 3;
 
 // Sun direction (normalised). Points up-and-slightly-left, like a mid-morning
-// sun in the northern hemisphere. Baked in as a constant to keep the sky fast.
+// sun in the northern hemisphere. Used by NEE to cast shadow rays.
 // normalize(vec3(0.4, 1.0, 0.3)) = vec3(0.3651, 0.9129, 0.1826)... approximately.
 const SUN_DIR: vec3<f32> = vec3<f32>(0.3651, 0.9129, 0.1826);
-
-// Sun apparent angular radius in radians. The real sun is ~0.00872 rad (0.5°);
-// making it ~2° gives visible caustics without requiring extreme precision.
-// cos(0.035) ≈ 0.99939
-const SUN_COS: f32 = 0.99939;
 
 // Sky colours at horizon and zenith, in linear light.
 //
@@ -188,9 +183,9 @@ const SUN_COS: f32 = 0.99939;
 const SKY_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.09, 0.07);
 const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.03, 0.06, 0.15);
 
-// Sun radiance. The sun is a small disk so most diffuse rays miss it, but it
-// provides the key specular highlights and hard shadows that give path-traced
-// images their punch. Reduced from the pre-sRGB-fix value for the same reason.
+// Sun radiance. With NEE, every surface bounce fires a shadow ray toward the
+// sun and computes the full BRDF contribution deterministically, so this value
+// directly controls how bright direct sunlit surfaces appear.
 const SUN_RADIANCE: vec3<f32> = vec3<f32>(10.0, 9.0, 7.0);
 
 // ============================================================================
@@ -477,22 +472,16 @@ fn traverse_bvh(
 // Sky and environment
 // ============================================================================
 
-// Procedural sky: gradient from horizon to zenith, with a sun disk.
-// Rays that miss all geometry land here.
+// Procedural sky: horizon-to-zenith gradient for rays that escape the scene.
+//
+// The sun is intentionally absent here. Direct sun lighting is handled by
+// Next Event Estimation (an explicit shadow ray toward SUN_DIR at every
+// opaque surface hit), which eliminates the need to stochastically find the
+// sun disk and reduces variance by orders of magnitude. Keeping the sun here
+// would double-count its contribution on every bounce.
 fn sky_color(dir: vec3<f32>) -> vec3<f32> {
-    // Gradient: 0 = horizon, 1 = zenith.
-    let t   = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-    var sky = mix(SKY_HORIZON, SKY_ZENITH, t);
-
-    // Sun disk: bright circle + soft glow ring.
-    let sun_dot = dot(dir, SUN_DIR);
-    let in_disk = select(0.0, 1.0, sun_dot > SUN_COS);
-    // A soft halo around the disk (smooth falloff over ~3° ring).
-    let halo = smoothstep(SUN_COS - 0.05, SUN_COS, sun_dot) * 0.15;
-    sky = sky + (SUN_RADIANCE - sky) * in_disk + halo * SUN_RADIANCE;
-
-    // Prevent the sky below the horizon from contributing negatively.
-    return max(sky, vec3(0.0));
+    let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(SKY_HORIZON, SKY_ZENITH, t);
 }
 
 // ============================================================================
@@ -752,6 +741,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Fresnel at normal incidence: 0.04 for dielectrics, albedo for metals.
             let f0 = mix(vec3(0.04), albedo, metallic);
             let F_approx = fresnel_schlick(n_dot_v, f0);
+
+            // ── Direct sun lighting (Next Event Estimation) ───────────────────
+            //
+            // Fire one shadow ray toward the sun at every opaque surface hit.
+            // If nothing blocks it, evaluate the full PBR BRDF at the sun angle
+            // and add the contribution directly — no lottery required.
+            //
+            // Without NEE the sun is a disk covering ~1/800th of the hemisphere.
+            // A diffuse bounce has a 1-in-800 chance of stumbling onto it, so
+            // most pixels stay dark and a few are explosively bright — classic
+            // Monte Carlo variance. NEE trades that for one extra BVH traversal
+            // per bounce and a completely smooth direct-lighting result.
+            let n_dot_sun = dot(n, SUN_DIR);
+            if n_dot_sun > 0.0 {
+                let shadow_orig = hit_pos + n * T_MIN;
+                let shadow_inv  = vec3(1.0 / SUN_DIR.x, 1.0 / SUN_DIR.y, 1.0 / SUN_DIR.z);
+                let shadow_hit  = traverse_bvh(shadow_orig, SUN_DIR, shadow_inv);
+
+                if shadow_hit.hit == 0u {
+                    // Sun is unoccluded — evaluate diffuse + specular at the sun angle.
+                    let H_sun   = normalize(v_dir + SUN_DIR);
+                    let v_dot_h = max(dot(v_dir, H_sun), 0.0001);
+                    let n_dot_h = max(dot(n, H_sun), 0.0001);
+
+                    // Fresnel at the view/half-vector angle.
+                    let F_sun = fresnel_schlick(v_dot_h, f0);
+
+                    // Lambertian diffuse: albedo/π, zero for metals, weighted by
+                    // the fraction of energy not claimed by Fresnel reflection.
+                    let diffuse_sun = albedo * (1.0 - metallic) * (vec3(1.0) - F_sun) * INV_PI;
+
+                    // Cook-Torrance specular: D * F * G / (4 · NdotV · NdotL).
+                    let D_sun = d_ggx(n_dot_h, alpha);
+                    let G_sun = smith_g2(n_dot_v, n_dot_sun, alpha);
+                    let specular_sun = F_sun * D_sun * G_sun
+                                     / max(4.0 * n_dot_v * n_dot_sun, 0.0001);
+
+                    radiance += throughput * (diffuse_sun + specular_sun)
+                              * n_dot_sun * SUN_RADIANCE;
+                }
+            }
 
             // Probability of taking the specular path. Clamp away from 0 and 1
             // to avoid zero-probability (division by zero) and 100% one-path scenarios.
