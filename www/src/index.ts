@@ -161,6 +161,45 @@ function endDrag(): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Scroll / pinch zoom
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Exponent multiplier in `radius *= exp(deltaY * ZOOM_SPEED)`.
+// At 0.002 a single mouse-wheel notch (deltaY ≈ 100 px) zooms ~18%;
+// a touchpad pinch event (deltaY ≈ 5 px) moves ~1% — smooth and
+// proportional at any scale.
+const ZOOM_SPEED  = 0.002;
+const MIN_RADIUS  = 0.01;   // don't let the camera fly inside the model
+
+canvas.addEventListener('wheel', e => {
+    if (!sceneLoaded) return;
+
+    // Prevent the browser from intercepting the scroll (page scroll or the
+    // native two-finger pinch-zoom overlay on macOS). Must be non-passive.
+    e.preventDefault();
+
+    // Normalise deltaY to "pixel-equivalent" units.  Browsers report three
+    // modes: pixels (0, used by smooth touchpads), lines (1, classic mouse
+    // wheels in Firefox), and pages (2, rare).  Multiply up so ZOOM_SPEED
+    // only needs one tuning value.
+    let delta = e.deltaY;
+    if (e.deltaMode === 1 /* DOM_DELTA_LINE */) delta *= 16;
+    if (e.deltaMode === 2 /* DOM_DELTA_PAGE */) delta *= 400;
+
+    // Exponential zoom keeps feel consistent regardless of current distance:
+    // the same scroll moves 18% of whatever the current radius is, so you
+    // never overshoot when close or crawl when far away.
+    //
+    // Sign convention (consistent for both mouse and touchpad):
+    //   deltaY < 0  →  scroll up / pinch open  →  radius shrinks  →  zoom in
+    //   deltaY > 0  →  scroll down / pinch in  →  radius grows    →  zoom out
+    turntable.radius = Math.max(MIN_RADIUS, turntable.radius * Math.exp(delta * ZOOM_SPEED));
+
+    if (hqRendering) hqCancelled = true;
+    applyTurntable();
+}, { passive: false }); // passive: false is required to call preventDefault()
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Render loop state  (declared before resizeCanvas so the TDZ doesn't bite)
 // ─────────────────────────────────────────────────────────────────────────────
 
