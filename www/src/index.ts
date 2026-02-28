@@ -6,7 +6,7 @@
  *   2. Accept a GLTF/GLB scene via drag-and-drop or file picker.
  *   3. Turntable camera: click-drag spins the scene in front of a fixed camera.
  *   4. Preview: update_camera → raster_frame → raster_get_pixels (60 fps rasterizer).
- *   5. Idle / HQ: update_camera → render → get_pixels → putImageData (path tracer).
+ *   5. HQ render: update_camera → render → get_pixels → putImageData (path tracer).
  */
 
 import init, {
@@ -170,24 +170,14 @@ let hqCancelled = false;   // set to true to stop the loop after the current sam
 
 const HQ_SAMPLES = 256;    // samples per pixel for a full quality render
 
-// ── Preview quality settings ──────────────────────────────────────────────────
+// ── Display strategy ──────────────────────────────────────────────────────────
 //
-// Two-phase preview strategy:
+// The rasterizer is the primary display: it renders whenever the camera changes
+// (drag, resize, scene load) and its output stays on screen until something
+// replaces it. The path tracer is only used for the explicit "Render" button.
 //
-//   1. While dragging — call the rasterizer (raster_frame / raster_get_pixels).
-//      Hardware rasterisation runs at 60 fps with no GPU→CPU stall overhead, so
-//      the turntable feels instantaneous even on complex scenes.
-//
-//   2. While idle — auto-accumulate up to AUTO_ACCUM_SAMPLES path-tracer samples
-//      at full resolution. Each successive sample averages with the last, so
-//      noise drops by ~√N. 16 samples give a 4× noise reduction that makes the
-//      image look decent before the user ever clicks "Render".
-
-/** Number of samples to auto-accumulate after the camera stops moving. */
-const AUTO_ACCUM_SAMPLES = 16;
-
-/** Next sample index to submit during idle accumulation (0 = reset accumulator). */
-let previewSampleIdx = 0;
+// This means the canvas always shows a sharp, textured, correctly-lit image
+// even when idle — no progressive noise build-up before the user renders.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Canvas sizing
@@ -200,7 +190,6 @@ function resizeCanvas(): void {
         canvas.width  = w;
         canvas.height = h;
         cameraDirty   = true;
-        previewSampleIdx = 0;  // old accum buffer is now the wrong size
     }
 }
 
@@ -237,70 +226,16 @@ async function renderDragFrame(): Promise<void> {
 }
 
 /**
- * Render one full-resolution accumulation sample.
- *
- * Passing `sampleIdx === 0` resets the GPU accumulator; subsequent calls add
- * to the running average. After AUTO_ACCUM_SAMPLES frames the loop stops and
- * the canvas holds a noticeably cleaner image.
- */
-async function renderAccumFrame(sampleIdx: number): Promise<void> {
-    if (rendering) return;
-    rendering = true;
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    if (sampleIdx === 0) {
-        // Lock the camera at the start of the accumulation sequence so all
-        // samples share an identical viewpoint.
-        update_camera(
-            ...cameraPos(), -turntable.azimuth, -turntable.elevation, VFOV, w / h,
-        );
-    }
-
-    render(w, h, sampleIdx, false);
-    const pixels = await get_pixels(w, h);
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
-
-    previewSampleIdx = sampleIdx + 1;
-
-    if (previewSampleIdx < AUTO_ACCUM_SAMPLES) {
-        setStatus(`Refining… ${previewSampleIdx} / ${AUTO_ACCUM_SAMPLES} spp`);
-    } else {
-        setStatus('Drag to spin · click Render for full quality');
-    }
-
-    rendering = false;
-}
-
-/** Compute the current world-space camera position from turntable state. */
-function cameraPos(): [number, number, number] {
-    const { target: [tx, ty, tz], azimuth: az, elevation: el, radius: r } = turntable;
-    const cosEl = Math.cos(el);
-    return [
-        tx + r * Math.sin(az) * cosEl,
-        ty + r * Math.sin(el),
-        tz + r * Math.cos(az) * cosEl,
-    ];
-}
-
-/**
  * Main animation loop.
  *
- * Priority order (highest first):
- *   1. Camera changed → render a quick drag frame and reset accumulation.
- *   2. Idle, accumulation not complete → render the next accumulation sample.
- *   3. Nothing to do → wait for next frame.
+ * Renders a raster frame whenever the camera changes (drag, resize, scene
+ * load). The rasterizer output stays on screen until the HQ path tracer
+ * explicitly replaces it — so the canvas is always showing something useful.
  */
 function tick(): void {
-    if (!hqRendering && sceneLoaded && !rendering) {
-        if (cameraDirty) {
-            cameraDirty      = false;
-            previewSampleIdx = 0;
-            renderDragFrame();
-        } else if (previewSampleIdx < AUTO_ACCUM_SAMPLES) {
-            renderAccumFrame(previewSampleIdx);
-        }
+    if (!hqRendering && sceneLoaded && !rendering && cameraDirty) {
+        cameraDirty = false;
+        renderDragFrame();
     }
 
     requestAnimationFrame(tick);
@@ -318,7 +253,7 @@ async function loadSceneBytes(bytes: Uint8Array): Promise<void> {
         applyTurntable();
         sceneLoaded = true;
         renderBtn.disabled = false;
-        setStatus('Refining… 0 / 16 spp');
+        setStatus('Drag to spin · click Render for full quality');
         fadeHints();
     } catch (err) {
         setStatus(`Error: ${err}`);
@@ -367,9 +302,6 @@ async function startHighQualityRender(): Promise<void> {
     hqRendering = false;
     renderBtn.textContent = 'Render';
     renderBtn.classList.remove('cancel');
-
-    // Prevent idle accumulation from overwriting the completed render.
-    previewSampleIdx = AUTO_ACCUM_SAMPLES;
 
     if (hqCancelled) {
         setStatus('Render cancelled — drag to spin');
