@@ -635,9 +635,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // ── Material properties ───────────────────────────────────────────────
 
-        var albedo    = mat.albedo.rgb * sample_texture(mat.albedo_tex, uv).rgb;
+        // GLTF spec: albedo and emissive textures are sRGB-encoded (gamma ~2.2).
+        // Decode to linear light before any math. Metallic/roughness and normal
+        // maps are linear data and must NOT be decoded.
+        let albedo_tex_samp = pow(sample_texture(mat.albedo_tex, uv).rgb, vec3(2.2));
+        var albedo    = mat.albedo.rgb * albedo_tex_samp;
         let emissive  = vec3(mat.emissive_r, mat.emissive_g, mat.emissive_b)
-                      * sample_texture(mat.emissive_tex, uv).rgb;
+                      * pow(sample_texture(mat.emissive_tex, uv).rgb, vec3(2.2));
 
         // Metallic/roughness texture: blue = metallic, green = roughness (GLTF spec).
         let mr_sample = sample_texture(mat.mr_tex, uv);
