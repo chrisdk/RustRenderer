@@ -84,7 +84,7 @@ const ctrl = new RenderController({
     getCanvasSize: () => ({ w: canvas.width || 1, h: canvas.height || 1 }),
     setStatus,
     onSceneLoaded: (bounds) => {
-        turntable.autoFrame(bounds);
+        turntable.autoFrame(bounds, VFOV);
         applyTurntable();
         renderBtn.disabled = false;
         fadeHints();

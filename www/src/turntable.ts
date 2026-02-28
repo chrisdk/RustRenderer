@@ -66,15 +66,29 @@ export class Turntable {
     /**
      * Reframe the camera so the given scene bounding box fills the viewport.
      *
-     * Sets the orbit target to the box centre and the radius to the full
-     * diagonal length, which guarantees the model is always fully visible
-     * regardless of orientation. Resets azimuth and elevation to the default
-     * starting view.
+     * Sets the orbit target to the box centre, resets azimuth and elevation to
+     * the default starting view, and places the camera at a distance that makes
+     * the model's largest dimension fill ~82 % of the vertical viewport height.
      *
-     * `bounds` must be `[minX, minY, minZ, maxX, maxY, maxZ]` — the format
-     * returned by the WASM `get_scene_bounds()` call.
+     * The old approach used the full 3-D diagonal as the radius, which for
+     * roughly-spherical models (where all three extents are similar) only fills
+     * about half the screen — the diagonal is √3 ≈ 1.73× the side length, so
+     * the model looks tiny and the user has to zoom in every time.
+     *
+     * The correct formula comes from the thin-lens / pinhole framing constraint:
+     *
+     *   tan(vfov/2) = (halfExtent / radius)
+     *   →  radius = halfExtent / tan(vfov/2)
+     *
+     * where halfExtent = max(dx, dy, dz) / 2.  Dividing by the fill factor
+     * (0.82) backs the camera off slightly so there is breathing room around the
+     * model rather than clipping it at the edge of the frustum.
+     *
+     * `bounds`  — `[minX, minY, minZ, maxX, maxY, maxZ]`, from `get_scene_bounds()`
+     * `vfov`    — vertical field of view in radians (must match the camera used
+     *             for rendering; defaults to 60° = π/3 if omitted)
      */
-    autoFrame(bounds: Float32Array): void {
+    autoFrame(bounds: Float32Array, vfov = Math.PI / 3): void {
         if (bounds.length < 6) return;
         this.target = [
             (bounds[0] + bounds[3]) / 2,
@@ -86,7 +100,13 @@ export class Turntable {
         const dx = bounds[3] - bounds[0];
         const dy = bounds[4] - bounds[1];
         const dz = bounds[5] - bounds[2];
-        this.radius = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz), 0.1);
+        // Half the largest dimension — the extent the camera must comfortably fit.
+        const maxHalf = Math.max(dx, dy, dz) / 2;
+        // Place the camera so maxHalf fills 82 % of the vertical half-frustum.
+        // The 0.82 fill factor leaves a little breathing room and prevents the
+        // model from touching the frame edges.
+        const FILL = 0.82;
+        this.radius = Math.max(maxHalf / (Math.tan(vfov / 2) * FILL), 0.1);
     }
 
     /**
