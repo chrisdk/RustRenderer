@@ -181,8 +181,12 @@ const SUN_COS: f32 = 0.99939;
 // from sRGB to linear (pow(x, 2.2)). Linear albedo values are ~2–4× darker
 // than raw sRGB, so the sky must be proportionally dimmer to avoid the bright
 // ambient washing out surface colours.
-const SKY_HORIZON: vec3<f32> = vec3<f32>(0.50, 0.45, 0.38);
-const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.08, 0.22, 0.50);
+//
+// In a path tracer the sky contributes at every bounce, so it must be much
+// dimmer than it would be in a rasteriser (where ambient is applied once).
+// Target: ~40% display-brightness background after ACES + gamma (~0.10 linear).
+const SKY_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.09, 0.07);
+const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.03, 0.06, 0.15);
 
 // Sun radiance. The sun is a small disk so most diffuse rays miss it, but it
 // provides the key specular highlights and hard shadows that give path-traced
