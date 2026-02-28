@@ -883,6 +883,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // ── Firefly suppression ───────────────────────────────────────────────────
+    //
+    // IBL environment maps contain a sun whose linear radiance can be thousands
+    // of times brighter than the scene average. When a metallic or specular
+    // bounce accidentally points toward it, the sample radiance blows up. These
+    // outlier samples are called "fireflies" — scattered bright pixels that
+    // accumulate over time rather than averaging out, because each sample
+    // independently has a small chance of hitting the bright spot.
+    //
+    // The correct fix is Multiple Importance Sampling (MIS) — weight env-map
+    // samples against the BRDF to give rare-but-bright directions their fair
+    // probability — but that is a sizeable feature. The standard stopgap is
+    // sample clamping: cap the per-sample luminance so no single sample can
+    // dominate the running average.
+    //
+    // Why 20? The ACES tone-mapper maps linear 20 to ~0.99 display brightness;
+    // linear 5 maps to ~0.96. Values above 20 are visually indistinguishable
+    // from white, so clamping there loses no perceptible information. A direct
+    // sun highlight through the GGX BRDF (SUN_RADIANCE = 10, BRDF peak ≈ 1)
+    // stays comfortably under 20, so legitimate bright specular pixels are
+    // unaffected. Only IBL sun hits (typically 500–5000+) get pulled down.
+    //
+    // The clamp is applied to the luminance so the hue of bright samples is
+    // preserved — we scale all channels equally rather than clamping per-channel.
+    let sample_lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+    let FIREFLY_CLAMP = 20.0;
+    if sample_lum > FIREFLY_CLAMP {
+        radiance *= FIREFLY_CLAMP / sample_lum;
+    }
+
     // ── Progressive accumulation ──────────────────────────────────────────────
     let sample = vec4<f32>(radiance, 1.0);
     var total: vec4<f32>;
