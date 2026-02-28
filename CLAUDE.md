@@ -7,6 +7,7 @@ A physically-based path tracer that runs in the browser. The rendering engine is
 - **Rendering Engine**: Rust, compiled to WASM via `wasm-pack`. GPU work done through WebGPU (`wgpu` crate).
 - **Scene format**: GLTF / GLB, loaded with the `gltf = "1"` crate.
 - **Math**: `glam = "0.29"` for matrix/vector ops (used during scene loading and BVH build).
+- **LSP**: `rust-analyzer-lsp` is installed on this machine. Use it for type checking, finding definitions, and getting diagnostics on Rust code without waiting for a full `cargo build`.
 
 ## How it works (big picture)
 
