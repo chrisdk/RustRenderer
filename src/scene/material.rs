@@ -59,10 +59,26 @@ pub struct Material {
     /// surface to glow while others remain dark.
     pub emissive_texture: i32,
 
-    /// Unused padding bytes. WGSL requires structs used as storage-buffer
-    /// array elements to be a multiple of 16 bytes; without this the struct
-    /// would be 52 bytes, which is not. Always zero.
-    pub _pad: [u32; 3],
+    /// Index of refraction for transmissive (glass-like) materials.
+    /// From the GLTF `KHR_materials_ior` extension; defaults to 1.5
+    /// (typical crown glass) when the extension is absent.
+    ///
+    /// Only meaningful when `transmission > 0`. Determines how much the
+    /// light ray bends as it crosses the surface (Snell's law) and how
+    /// much is reflected vs refracted (Fresnel equations).
+    pub ior: f32,
+
+    /// Fraction of light that passes through the surface rather than being
+    /// absorbed or scattered. From the GLTF `KHR_materials_transmission`
+    /// extension; 0.0 for opaque surfaces, 1.0 for fully transmissive glass.
+    ///
+    /// When > 0 the shader fires a refracted ray through the surface rather
+    /// than scattering diffusely, enabling caustics and colour-accurate glass.
+    pub transmission: f32,
+
+    /// Padding to reach 64 bytes (required multiple of 16 for WGSL storage
+    /// buffer array elements). Always zero.
+    pub _pad: u32,
 }
 
 impl Default for Material {
@@ -79,7 +95,9 @@ impl Default for Material {
             normal_texture:             -1,
             metallic_roughness_texture: -1,
             emissive_texture:           -1,
-            _pad:                       [0, 0, 0],
+            ior:                        1.5,
+            transmission:               0.0,
+            _pad:                       0,
         }
     }
 }
@@ -104,7 +122,9 @@ mod tests {
         assert_eq!(offset_of!(Material, normal_texture),             40);
         assert_eq!(offset_of!(Material, metallic_roughness_texture), 44);
         assert_eq!(offset_of!(Material, emissive_texture),           48);
-        assert_eq!(offset_of!(Material, _pad),                       52);
+        assert_eq!(offset_of!(Material, ior),                        52);
+        assert_eq!(offset_of!(Material, transmission),               56);
+        assert_eq!(offset_of!(Material, _pad),                       60);
         let _: &[u8] = bytemuck::bytes_of(&Material::zeroed());
     }
 }

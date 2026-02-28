@@ -11,7 +11,7 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-gltf     = "1"
+gltf     = { version = "1", features = ["KHR_materials_ior", "KHR_materials_transmission"] }
 glam     = "0.32"
 bytemuck = { version = "1", features = ["derive"] }
 log      = "0.4"   # logging facade; backend differs per target (see below)

@@ -128,7 +128,10 @@ impl Scene {
                     emissive_texture: mat.emissive_texture()
                         .map(|i| i.texture().source().index() as i32)
                         .unwrap_or(-1),
-                    _pad: [0, 0, 0],
+                    ior: mat.ior().unwrap_or(1.5),
+                    transmission: mat.transmission()
+                        .map_or(0.0, |t| t.transmission_factor()),
+                    _pad: 0,
                 }
             })
             .collect();
