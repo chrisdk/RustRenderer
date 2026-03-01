@@ -603,7 +603,7 @@ fn sample_env(dir: vec3<f32>) -> vec3<f32> {
 
     // Wrap U (equirectangular is periodic), clamp V (poles).
     let x0 = u32(((x0i     % i32(W)) + i32(W)) % i32(W));
-    let x1 = u32(((x0i + 1 % i32(W)) + i32(W)) % i32(W));
+    let x1 = u32((((x0i + 1) % i32(W)) + i32(W)) % i32(W));
     let y0 = u32(clamp(y0i,     0, i32(H) - 1));
     let y1 = u32(clamp(y0i + 1, 0, i32(H) - 1));
 
