@@ -444,24 +444,40 @@ fovSlider.addEventListener('input', () => {
 // Renderer controls — bounce count, exposure, sun, IBL
 // ─────────────────────────────────────────────────────────────────────────────
 /**
- * Max-bounces slider. Higher = more accurate glass/indirect, slower render.
- * Starts a new render because old samples (traced at a different depth) would
- * blend incorrectly with new ones.
+ * Timer used to debounce render restarts triggered by renderer-control sliders.
+ *
+ * When the user drags a slider we cancel any running render immediately (so
+ * stale samples stop accumulating) and schedule a fresh render to start 300 ms
+ * after the *last* slider event.  The debounce means rapid dragging queues only
+ * one restart rather than dozens.
  */
+let sliderRenderTimer = null;
+/**
+ * Cancel the current HQ render and schedule a new one to start 300 ms after
+ * the most recent slider adjustment.
+ *
+ * Does nothing if no scene is loaded — the sliders have no effect without geometry.
+ */
+function scheduleRenderRestart() {
+    if (!ctrl.sceneLoaded)
+        return;
+    ctrl.cancelHighQualityRender();
+    if (sliderRenderTimer !== null)
+        clearTimeout(sliderRenderTimer);
+    sliderRenderTimer = setTimeout(() => {
+        sliderRenderTimer = null;
+        ctrl.startHighQualityRender();
+    }, 300);
+}
+/** Max-bounces slider. Higher = more accurate glass/indirect, slower render. */
 bouncesSlider.addEventListener('input', () => {
     const n = parseInt(bouncesSlider.value, 10);
     bouncesValue.textContent = `${n}`;
     set_max_bounces(n);
-    ctrl.cancelHighQualityRender();
+    scheduleRenderRestart();
 });
 /**
  * Exposure slider. Applied as `linear × 2^EV` before ACES tone-mapping.
- *
- * Exposure is a display-time transform over the already-accumulated average,
- * so it does NOT need to restart the render — the same samples look brighter
- * or dimmer on the next `get_pixels` call. This makes it the only slider that
- * works live during a running HQ render.
- *
  * The range element uses integer steps (−30…+30) to avoid float-step browser
  * quirks; we divide by 10 to get −3.0…+3.0 EV.
  */
@@ -469,45 +485,36 @@ exposureSlider.addEventListener('input', () => {
     const ev = parseInt(exposureSlider.value, 10) / 10;
     exposureValue.textContent = `${ev >= 0 ? '+' : ''}${ev.toFixed(1)} EV`;
     set_exposure(ev);
-    // Intentionally no cancelHighQualityRender() — exposure updates live.
+    scheduleRenderRestart();
 });
-/**
- * Sun azimuth slider — horizontal compass direction (0–360°).
- * Restarts any running HQ render because the lighting changes.
- */
+/** Sun azimuth slider — horizontal compass direction (0–360°). */
 sunAzSlider.addEventListener('input', () => {
     const deg = parseInt(sunAzSlider.value, 10);
     sunAzValue.textContent = `${deg}°`;
     set_sun_azimuth(deg);
-    ctrl.cancelHighQualityRender();
+    scheduleRenderRestart();
 });
-/**
- * Sun elevation slider — angle above the horizon (0 = horizon, 90 = zenith).
- */
+/** Sun elevation slider — angle above the horizon (0 = horizon, 90 = zenith). */
 sunElSlider.addEventListener('input', () => {
     const deg = parseInt(sunElSlider.value, 10);
     sunElValue.textContent = `${deg}°`;
     set_sun_elevation(deg);
-    ctrl.cancelHighQualityRender();
+    scheduleRenderRestart();
 });
-/**
- * Sun intensity slider. Integer steps ×10 → 0.0–5.0× multiplier.
- */
+/** Sun intensity slider. Integer steps ×10 → 0.0–5.0× multiplier. */
 sunIntSlider.addEventListener('input', () => {
     const scale = parseInt(sunIntSlider.value, 10) / 10;
     sunIntValue.textContent = `${scale.toFixed(1)}×`;
     set_sun_intensity(scale);
-    ctrl.cancelHighQualityRender();
+    scheduleRenderRestart();
 });
-/**
- * IBL brightness slider. Scales env-map and sky contributions uniformly.
- * Integer steps ×10 → 0.0–4.0× multiplier.
- */
+/** IBL brightness slider. Scales env-map and sky contributions uniformly.
+ *  Integer steps ×10 → 0.0–4.0× multiplier. */
 iblScaleSlider.addEventListener('input', () => {
     const scale = parseInt(iblScaleSlider.value, 10) / 10;
     iblScaleValue.textContent = `${scale.toFixed(1)}×`;
     set_ibl_scale(scale);
-    ctrl.cancelHighQualityRender();
+    scheduleRenderRestart();
 });
 // ─────────────────────────────────────────────────────────────────────────────
 // Save PNG
