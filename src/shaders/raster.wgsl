@@ -504,11 +504,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // not occluded by this baked term.
     let occlusion = sample_tex(mat.occlusion_texture, uv).r;
 
-    // Diffuse ambient: Lambertian sky/env colour weighted by (1−metallic).
+    // Diffuse ambient: Lambertian sky colour weighted by (1−metallic).
     // Metals have no diffuse response — their reflectance is all specular.
-    // Uses the full HDR env map at N for correct sky/ground tinting on matte
-    // surfaces.
-    let diffuse_ambient = albedo * ambient_color(N) * (1.0 - metallic) * occlusion;
+    //
+    // We always use sky_ambient(N) here, not sample_env(N). Sampling the HDR
+    // at the surface normal N is a matcap: the full-resolution env texture is
+    // painted directly onto the surface through N, so a curved object shows the
+    // whole landscape on it. Real diffuse irradiance is the hemisphere integral
+    // of incoming radiance — a very blurry version of the env map — which the
+    // smooth procedural sky gradient approximates far better than a sharp lookup.
+    // The HDR only contributes to *specular* (reflections), below.
+    let diffuse_ambient = albedo * sky_ambient(N) * frame.ibl_scale * (1.0 - metallic) * occlusion;
 
     // Specular ambient: Karis 2013 BRDF LUT amplitude × env colour.
     //
