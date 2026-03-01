@@ -252,7 +252,7 @@ struct VertexOutput {
     @location(0) world_pos:          vec3<f32>,
     @location(1) world_normal:       vec3<f32>,
     @location(2) uv:                 vec2<f32>,
-    @location(3) mat_index:          u32,
+    @location(3) @interpolate(flat) mat_index: u32,
     @location(4) world_tangent:      vec4<f32>,  // xyz = world-space tangent, w = handedness
 }
 
