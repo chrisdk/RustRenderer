@@ -1,0 +1,16 @@
+{
+  "name": "render",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "render_bg.wasm",
+    "render.js",
+    "render.d.ts"
+  ],
+  "main": "render.js",
+  "types": "render.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
