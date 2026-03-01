@@ -504,17 +504,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // not occluded by this baked term.
     let occlusion = sample_tex(mat.occlusion_texture, uv).r;
 
-    // Sample the env map once at the surface normal (used for both diffuse ambient
-    // and as the "rough limit" colour for specular ambient). Reusing it saves a
-    // texture lookup.
-    let env_N = ambient_color(N);
-
     // Diffuse ambient: Lambertian sky/env colour weighted by (1−metallic).
     // Metals have no diffuse response — their reflectance is all specular.
-    let diffuse_ambient = albedo * env_N * (1.0 - metallic) * occlusion;
+    // Uses the full HDR env map at N for correct sky/ground tinting on matte
+    // surfaces.
+    let diffuse_ambient = albedo * ambient_color(N) * (1.0 - metallic) * occlusion;
 
-    // Specular ambient: Karis 2013 BRDF LUT amplitude × env colour,
-    // with a two-pronged fix for the "everything looks chrome" problem.
+    // Specular ambient: Karis 2013 BRDF LUT amplitude × env colour.
     //
     // AMPLITUDE (Karis LUT): Raw Schlick Fresnel approaches 1.0 at grazing
     // angles regardless of roughness, making every surface look chrome-plated.
@@ -523,36 +519,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // For rough surfaces, scale→0 and bias→0, correctly suppressing the
     // specular. This is an analytical fit; no texture lookup required.
     //
-    // COLOUR — two complementary fixes:
-    //
-    // 1. Hard cutoff via `mirror_w`: surfaces with roughness ≥ 0.5 get zero
-    //    directional reflection and see only env_N (the same smooth direction
-    //    the diffuse term uses). mirror_w = pow(max(0, 1−roughness×2), 2) falls
-    //    to zero at roughness=0.5, eliminating landscape reflections on matte
-    //    and semi-rough surfaces entirely.
-    //
-    // 2. Cone blur via `blurred_specular_env`: for smoother surfaces where
-    //    mirror_w > 0, the sample at R is replaced by an average of 5 directions
-    //    in a cone of half-angle roughness×0.9 radians. This mimics the GGX
-    //    lobe spread the path tracer achieves by sampling many microfacet
-    //    directions. Without this blur, even 20% of a single sharp R sample can
-    //    show a vivid sky-vs-terrain edge as a clear reflection band.
+    // COLOUR — the rough fallback must NOT be sample_env(N):
+    //   Using sample_env(N) as the "rough" component is a matcap — it maps the
+    //   full-resolution HDR texture directly onto the surface via the normal
+    //   direction, making every metallic pixel show the exact landscape colour
+    //   at its N direction. Instead use sky_ambient(N), a smooth analytical
+    //   gradient (blue-sky → warm-ground), as the rough-surface fallback.
+    //   For smooth mirrors (mirror_w → 1) we blend toward blurred_specular_env(R)
+    //   which samples the real HDR around the reflection direction.
     let brdf_c0  = vec4<f32>(-1.0, -0.0275, -0.572,  0.022);
     let brdf_c1  = vec4<f32>( 1.0,  0.0425,  1.04,  -0.04);
     let brdf_r   = roughness * brdf_c0 + brdf_c1;
     let brdf_a   = min(brdf_r.x * brdf_r.x, exp2(-9.28 * n_dot_v)) * brdf_r.x + brdf_r.y;
     let brdf_ab  = vec2<f32>(-1.04, 1.04) * brdf_a + brdf_r.zw;
-    // mirror_w: how much of the sharp reflection direction R contributes vs the
-    // smooth normal direction N. Falls to zero at roughness=0.5 so anything
-    // rougher sees only env_N — no directional landscape reflection at all.
-    // Uses pow(…, 2) for a smooth roll-off rather than a hard cutoff.
+    // Smooth sky gradient as the rough-surface fallback: gives a physically
+    // plausible hemisphere average without the vivid HDR matcap artefact.
+    let spec_fallback = sky_ambient(N) * frame.ibl_scale;
+    // mirror_w falls to zero at roughness=0.5; rougher surfaces see only
+    // spec_fallback (no directional HDR reflection).
     let mirror_w = pow(max(0.0, 1.0 - roughness * 2.0), 2.0);
-    var specular_env = env_N;
+    var specular_env = spec_fallback;
     if (mirror_w > 0.005) {
-        // blurred_specular_env averages 5 directions around R (cone ∝ roughness)
-        // to approximate the GGX lobe spread; skip for rough surfaces where
-        // mirror_w ≈ 0 anyway to avoid the 5× texture cost for no benefit.
-        specular_env = mix(env_N, blurred_specular_env(R, roughness), mirror_w);
+        specular_env = mix(spec_fallback, blurred_specular_env(R, roughness), mirror_w);
     }
     let specular_ambient = (f0 * brdf_ab.x + brdf_ab.y) * specular_env * occlusion;
 
