@@ -6,7 +6,7 @@ A physically-based path tracer that runs in the browser. The rendering engine is
 - **Frontend**: TypeScript (not JavaScript), no framework, no bundler. Communicates with the engine via WASM.
 - **Rendering Engine**: Rust, compiled to WASM via `wasm-pack`. GPU work done through WebGPU (`wgpu` crate).
 - **Scene format**: GLTF / GLB, loaded with the `gltf = "1"` crate.
-- **Math**: `glam = "0.29"` for matrix/vector ops (used during scene loading and BVH build).
+- **Math**: `glam = "0.32"` for matrix/vector ops (used during scene loading and BVH build).
 - **LSP**: `rust-analyzer-lsp` is installed on this machine. Use it for type checking, finding definitions, and getting diagnostics on Rust code without waiting for a full `cargo build`.
 
 ## How it works (big picture)
@@ -17,10 +17,15 @@ Two rendering modes:
 2. **Final render** — triggered by clicking "Render"; the path tracer accumulates samples progressively until cancelled. Automatically resets on camera move.
 
 The WASM API (in `src/lib.rs`) exposes:
-1. `load_scene(bytes)` — parse GLTF, build GPU buffers, build BVH, upload to both renderers.
-2. `update_camera(...)` — update the camera uniform buffer; resets path-tracer accumulation.
-3. `render()` / `get_pixels()` — one path-tracer sample accumulation pass + staging readback.
-4. `raster_frame(width, height)` / `raster_get_pixels(width, height)` — hardware rasterizer frame.
+1. `init_renderer()` — async; picks GPU adapter, opens device.
+2. `load_scene(bytes)` — parse GLTF, build GPU buffers, build BVH, upload to both renderers.
+3. `load_environment(bytes)` / `unload_environment()` — load/unload an HDRI `.hdr` env map.
+4. `update_camera(...)` — update camera uniform; resets path-tracer accumulation.
+5. `render(width, height, sample_index, preview)` / `get_pixels(width, height)` — one path-tracer pass + readback.
+6. `raster_frame(width, height)` / `raster_get_pixels(width, height)` — hardware rasterizer frame.
+7. `get_scene_bounds()` — world-space AABB as `Float32Array`; used for camera auto-framing.
+8. Per-control setters: `set_env_background`, `set_ibl_enabled`, `set_max_bounces`,
+   `set_sun_azimuth`, `set_sun_elevation`, `set_sun_intensity`, `set_ibl_scale`, `set_exposure`.
 
 ## Module map
 
@@ -108,19 +113,19 @@ publish.sh               build, assemble docs/, commit, push to GitHub Pages
 - [x] IBL (Image-Based Lighting) — HDRI environment maps, equirectangular sampling, firefly suppression
 - [x] NEE (Next Event Estimation) — analytical directional sun light sampled explicitly each bounce
 - [x] Progressive accumulation — running weighted average of samples; ACES tonemapping on display
-- [x] Hardware rasterizer — `raster.rs` / `raster.wgsl`: PBR approximation, per-instance transforms, 60 fps interactive preview
+- [x] Hardware rasterizer — `raster.rs` / `raster.wgsl`: all four PBR texture maps (albedo, normal, metallic/roughness, emissive, occlusion) with bilinear filtering; TBN normal mapping; GGX specular + Schlick Fresnel; specular IBL (split-sum approximation) for metallic surfaces; HDR env-map ambient; sky background pass; sun azimuth/elevation/intensity; IBL scale; exposure — fully at parity with path-tracer controls
 - [x] Turntable camera — drag-to-orbit, scroll-to-zoom (mouse wheel + touchpad pinch), auto-framing on scene load
 - [x] Portability — crate builds as both `cdylib` (WASM) and `rlib` (native); WASM glue is `#[cfg(wasm32)]`-gated throughout
-- [x] WASM API — `init_renderer`, `load_scene`, `update_camera`, `render`, `get_pixels`, `raster_frame`, `raster_get_pixels`
+- [x] WASM API — full suite: scene + env loading, camera, path-tracer, rasterizer, per-control setters
 - [x] TypeScript frontend — scene picker, drag-and-drop GLTF/HDR loader, render button, HQ/preview mode switching
-- 91+ unit tests, all passing (`cargo test`)
+- [x] Naga-based shader validation tests — WGSL parsed and validated at `cargo test` time; Rust↔WGSL struct layout cross-checks for every uniform
+- 113+ unit tests, all passing (`cargo test`)
 
 ## What's next
 
-1. **MIS (Multiple Importance Sampling)** — proper way to sample IBL without needing the firefly clamp; balance between BRDF sampling and environment map sampling
-2. **Texture maps in the rasterizer** — currently uses solid `base_color_factor` only; sampling the full texture array would make the preview match the path-tracer output better
-3. **Depth of field** — thin-lens model: sample a disc on the aperture and converge at a focus distance
-4. **Emissive mesh lights** — area lights from geometry with emissive materials; currently only IBL + analytical sun
+1. **Depth of field** — thin-lens model: sample a disc on the aperture and converge at a focus distance
+2. **Emissive mesh lights** — area lights from geometry with emissive materials; currently only IBL + analytical sun
+3. **Sky quad in rasterizer** — render the sky/env-map as background pixels (currently done via fullscreen triangle pass; a dedicated sky sphere would allow proper Rayleigh scattering approximation)
 
 ## Publishing
 
