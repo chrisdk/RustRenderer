@@ -248,6 +248,77 @@ mod shader_tests {
         validate("trace.wgsl", include_str!("../shaders/trace.wgsl"));
     }
 
+    /// Every integer-typed field in a vertex shader's output struct must carry
+    /// an explicit `@interpolate(flat)` attribute in the WGSL **source text**.
+    ///
+    /// ## Why a source-text check, not an IR check?
+    ///
+    /// Naga infers `Interpolation::Flat` for integer-typed location bindings
+    /// automatically, even when the attribute is absent from the source. So an
+    /// IR-level check (inspecting `naga::Binding::Location { interpolation }`)
+    /// always sees `Some(Flat)` and would pass even on the broken shader.
+    ///
+    /// Chrome's Tint compiler (the WebGPU reference implementation) does *not*
+    /// do this inference — it requires the explicit annotation and rejects the
+    /// shader at parse time with:
+    ///
+    /// > "integral user-defined vertex outputs must have a '@interpolate(flat)' attribute"
+    ///
+    /// The mismatch means a shader passes `cargo test` (Naga) and then
+    /// silently produces a blank canvas on Chrome. Checking the source text
+    /// directly closes that gap without needing Tint installed.
+    ///
+    /// The bug that prompted this test: `mat_index: u32` in `VertexOutput` was
+    /// missing `@interpolate(flat)`, discovered only when testing on Chrome M1.
+    #[test]
+    fn test_raster_vertex_integer_outputs_are_flat() {
+        let src = include_str!("../shaders/raster.wgsl");
+
+        // Locate the VertexOutput struct body. The output of the vertex
+        // entry point is the only struct whose fields need @interpolate(flat).
+        let struct_start = src.find("struct VertexOutput {")
+            .expect("VertexOutput struct not found in raster.wgsl");
+        let brace_open  = struct_start + src[struct_start..].find('{').unwrap() + 1;
+        let brace_close = brace_open   + src[brace_open..].find('}').unwrap();
+        let struct_body = &src[brace_open..brace_close];
+
+        // Integer primitive types that, per WGSL spec §11.3.1, cannot be
+        // interpolated across a triangle and require @interpolate(flat).
+        let integer_types = [
+            "u32", "i32",
+            "vec2<u32>", "vec3<u32>", "vec4<u32>",
+            "vec2<i32>", "vec3<i32>", "vec4<i32>",
+        ];
+
+        for line in struct_body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("//") { continue; }
+
+            // A field line looks like:
+            //   @location(N) @interpolate(flat) name: u32,
+            // or it might have a trailing comment. We check:
+            //   - has @location (so it's an inter-stage varying, not a builtin)
+            //   - has an integer type
+            //   - has @interpolate(flat)
+            let has_location = line.contains("@location(");
+            let is_integer   = integer_types.iter().any(|t| {
+                // Match `: TYPE` with optional trailing comma/comment.
+                line.contains(&format!(": {t},")) || line.contains(&format!(": {t} "))
+                    || line.ends_with(&format!(": {t}"))
+            });
+
+            if has_location && is_integer {
+                assert!(
+                    line.contains("@interpolate(flat)"),
+                    "VertexOutput field is missing @interpolate(flat):\n  {line}\n\
+                     Chrome/Tint requires an explicit @interpolate(flat) on integer \
+                     vertex outputs. Naga infers it silently, masking the error until \
+                     the shader hits Chrome at runtime.",
+                );
+            }
+        }
+    }
+
     // ── Rust ↔ WGSL layout cross-checks ──────────────────────────────────────
     //
     // The Rust structs already have `offset_of!` tests in their own modules,
