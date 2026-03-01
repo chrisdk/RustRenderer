@@ -40,15 +40,6 @@ struct RasterCamera {
     _pad:    f32,          // padding to 144 B            (offset 140)
 }
 
-/// Per-instance data: model transform + material index.
-/// Must match GpuInstance in raster.rs (80 bytes, multiple of 16).
-struct InstanceData {
-    transform: mat4x4<f32>,  // local → world space (64 B)
-    mat_index: u32,
-    _p0: u32,
-    _p1: u32,
-    _p2: u32,
-}
 
 /// Material parameters, byte-for-byte identical to src/scene/material.rs.
 /// 64 bytes.
@@ -100,7 +91,6 @@ struct RasterFrame {
 }
 
 @group(0) @binding(0) var<uniform>       camera:     RasterCamera;
-@group(0) @binding(1) var<storage, read> instances:  array<InstanceData>;
 @group(0) @binding(2) var<storage, read> materials:  array<Material>;
 /// Flat RGBA8 pixel data for all textures. One u32 per pixel: R in low byte,
 /// A in high byte. Same packing as the path tracer's tex_data buffer.
@@ -236,8 +226,25 @@ struct VertexInput {
     @location(1) normal:   vec3<f32>,  // offset 12
     @location(2) uv:       vec2<f32>,  // offset 24
     @location(3) tangent:  vec4<f32>,  // offset 32 — xyz tangent dir, w handedness
+}
 
-    @builtin(instance_index) instance_id: u32,
+/// Per-instance data fed as vertex attributes with step_mode = Instance.
+///
+/// Using vertex attributes (rather than a storage buffer indexed by
+/// @builtin(instance_index)) avoids the `maxStorageBuffersInVertexStage`
+/// limit, which Chrome/Dawn enforces as 0 — any vertex-stage storage buffer
+/// silently causes the draw call to produce nothing on those browsers.
+///
+/// Each of the four matrix columns occupies one vec4 attribute slot (locations
+/// 4–7). The material index is a u32 at location 8. The Rust side packs these
+/// fields identically in `GpuInstance`, with the instance vertex buffer set to
+/// step_mode = Instance so one `GpuInstance` row is consumed per draw call.
+struct InstanceInput {
+    @location(4) col0:      vec4<f32>,  // transform matrix column 0 (local → world)
+    @location(5) col1:      vec4<f32>,  // transform matrix column 1
+    @location(6) col2:      vec4<f32>,  // transform matrix column 2
+    @location(7) col3:      vec4<f32>,  // transform matrix column 3
+    @location(8) mat_index: u32,        // index into the materials storage buffer
 }
 
 struct VertexOutput {
@@ -250,31 +257,33 @@ struct VertexOutput {
 }
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    let inst = instances[in.instance_id];
+fn vs_main(in: VertexInput, inst: InstanceInput) -> VertexOutput {
+    // Reconstruct the mat4x4 transform from the four column vectors delivered
+    // as vertex attributes. WGSL mat4x4 constructor takes columns in order.
+    let transform = mat4x4<f32>(inst.col0, inst.col1, inst.col2, inst.col3);
 
     // Transform position: local → world → camera → clip.
-    let world_pos4 = inst.transform * vec4<f32>(in.position, 1.0);
+    let world_pos4 = transform * vec4<f32>(in.position, 1.0);
     let clip_pos   = camera.proj * camera.view * world_pos4;
 
     // Upper-left 3×3 of the model matrix, used to transform direction vectors.
     // For non-uniform scaling, the correct normal transform is the transpose of
     // the inverse, but for the preview pass this approximation looks fine.
     let m3 = mat3x3<f32>(
-        inst.transform[0].xyz,
-        inst.transform[1].xyz,
-        inst.transform[2].xyz,
+        transform[0].xyz,
+        transform[1].xyz,
+        transform[2].xyz,
     );
     let world_normal  = normalize(m3 * in.normal);
     // Tangent transforms the same way as normals for direction vectors.
     let world_tangent = vec4<f32>(normalize(m3 * in.tangent.xyz), in.tangent.w);
 
     var out: VertexOutput;
-    out.clip_pos    = clip_pos;
-    out.world_pos   = world_pos4.xyz;
-    out.world_normal = world_normal;
-    out.uv          = in.uv;
-    out.mat_index   = inst.mat_index;
+    out.clip_pos      = clip_pos;
+    out.world_pos     = world_pos4.xyz;
+    out.world_normal  = world_normal;
+    out.uv            = in.uv;
+    out.mat_index     = inst.mat_index;
     out.world_tangent = world_tangent;
     return out;
 }

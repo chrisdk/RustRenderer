@@ -19,12 +19,16 @@
 //! | Group | Binding | Name        | Type    | Shader stage       |
 //! |-------|---------|-------------|---------|---------------------|
 //! | 0     | 0       | camera      | uniform | vertex + fragment  |
-//! | 0     | 1       | instances   | storage | vertex             |
 //! | 0     | 2       | materials   | storage | fragment           |
 //! | 0     | 3       | tex_data    | storage | fragment           |
 //! | 0     | 4       | tex_info    | storage | fragment           |
 //! | 0     | 5       | frame       | uniform | fragment           |
 //! | 0     | 6       | env_pixels  | storage | fragment           |
+//!
+//! Instance transforms are *not* in the bind group. They are delivered as
+//! per-instance vertex attributes (step_mode = Instance) in vertex buffer
+//! slot 1 — this avoids the `maxStorageBuffersInVertexStage` limit that
+//! Chrome/Dawn enforces as 0, which caused a blank canvas on Chrome M1.
 //!
 //! ## Rendering approach
 //!
@@ -39,9 +43,11 @@
 //! 2. **Geometry pass** — one draw call per `MeshInstance`. All vertices live
 //!    in a single shared vertex buffer; all indices in a single index buffer.
 //!    Instance transforms and material indices are packed into a `GpuInstance`
-//!    storage buffer, indexed by the builtin `instance_index`. Uses
-//!    `depth_compare = Less` + `depth_write_enabled = true` so geometry
-//!    correctly overwrites sky pixels and depth-tests between instances.
+//!    vertex buffer (slot 1, step_mode = Instance), read as vertex attributes
+//!    rather than a storage buffer to comply with Chrome's
+//!    `maxStorageBuffersInVertexStage = 0` limit. Uses `depth_compare = Less`
+//!    + `depth_write_enabled = true` so geometry correctly overwrites sky
+//!    pixels and depth-tests between instances.
 
 use crate::camera::RasterCameraUniform;
 use crate::scene::{geometry::Vertex, material::Material, Scene};
@@ -247,7 +253,10 @@ impl RasterRenderer {
             &wgpu::util::BufferInitDescriptor {
                 label:    Some("raster_instances"),
                 contents: bytemuck::cast_slice(&instances),
-                usage:    wgpu::BufferUsages::STORAGE,
+                // VERTEX usage (not STORAGE): instance transforms are delivered
+                // as per-instance vertex attributes, bypassing the vertex-stage
+                // storage-buffer limit that Chrome/Dawn enforces as 0.
+                usage:    wgpu::BufferUsages::VERTEX,
             },
         ));
 
@@ -381,17 +390,9 @@ impl RasterRenderer {
                     },
                     count: None,
                 },
-                // Binding 1: instance transforms (vertex only)
-                wgpu::BindGroupLayoutEntry {
-                    binding:    1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size:   None,
-                    },
-                    count: None,
-                },
+                // NOTE: no binding 1. Instance data is in vertex buffer slot 1
+                // (step_mode = Instance), not a storage buffer. This is required
+                // because Chrome/Dawn enforces maxStorageBuffersInVertexStage = 0.
                 // Binding 2: materials (fragment only)
                 wgpu::BindGroupLayoutEntry {
                     binding:    2,
@@ -471,6 +472,22 @@ impl RasterRenderer {
             ],
         };
 
+        // ── Instance vertex buffer layout (must match GpuInstance: 80 bytes) ──
+        // Delivers per-instance transform + material index as vertex attributes
+        // with step_mode = Instance — one GpuInstance row is consumed per draw
+        // call, avoiding any vertex-stage storage buffer.
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GpuInstance>() as wgpu::BufferAddress,
+            step_mode:    wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute { shader_location: 4, offset:  0, format: wgpu::VertexFormat::Float32x4 }, // col0
+                wgpu::VertexAttribute { shader_location: 5, offset: 16, format: wgpu::VertexFormat::Float32x4 }, // col1
+                wgpu::VertexAttribute { shader_location: 6, offset: 32, format: wgpu::VertexFormat::Float32x4 }, // col2
+                wgpu::VertexAttribute { shader_location: 7, offset: 48, format: wgpu::VertexFormat::Float32x4 }, // col3
+                wgpu::VertexAttribute { shader_location: 8, offset: 64, format: wgpu::VertexFormat::Uint32    }, // mat_index
+            ],
+        };
+
         // ── Render pipeline ──────────────────────────────────────────────────
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:  Some("raster_pipeline"),
@@ -480,7 +497,7 @@ impl RasterRenderer {
                 module:             &shader,
                 entry_point:        Some("vs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers:            &[vertex_layout],
+                buffers:            &[vertex_layout, instance_layout],
             },
 
             fragment: Some(wgpu::FragmentState {
@@ -673,10 +690,7 @@ impl RasterRenderer {
                     binding:  0,
                     resource: self.camera_buf.as_ref().expect("upload_camera not called").as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding:  1,
-                    resource: self.instance_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
-                },
+                // No binding 1 — instance data is in vertex buffer slot 1.
                 wgpu::BindGroupEntry {
                     binding:  2,
                     resource: self.material_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
@@ -751,6 +765,11 @@ impl RasterRenderer {
             // set_bind_group not repeated: the same bind group stays active after
             // a pipeline switch when both pipelines share the same layout.
             pass.set_vertex_buffer(0, self.vertex_buf.as_ref().expect("upload_scene not called").slice(..));
+            // Slot 1: instance buffer (step_mode = Instance). The draw_indexed
+            // call uses first_instance = dc.instance_id, which advances the
+            // GPU's read pointer to instance_buf[instance_id * stride] —
+            // delivering the correct transform and material for each draw call.
+            pass.set_vertex_buffer(1, self.instance_buf.as_ref().expect("upload_scene not called").slice(..));
             pass.set_index_buffer(
                 self.index_buf.as_ref().expect("upload_scene not called").slice(..),
                 wgpu::IndexFormat::Uint32,
@@ -883,17 +902,19 @@ mod tests {
         let _: &[u8] = bytemuck::bytes_of(&RasterFrameUniforms::zeroed());
     }
 
-    /// `GpuInstance` is packed into a storage buffer read by the vertex shader.
-    /// The WGSL `InstanceData` struct must match byte-for-byte. A silent drift
-    /// here means every instance will use the wrong transform or material.
+    /// `GpuInstance` is packed into a vertex buffer read as per-instance
+    /// vertex attributes. The attribute offsets in `instance_layout` inside
+    /// `build_pipeline` must match these byte offsets — a mismatch silently
+    /// delivers the wrong column to the wrong attribute slot, scrambling all
+    /// instance transforms with no error message.
     #[test]
     fn test_gpu_instance_layout() {
         assert_eq!(size_of::<GpuInstance>(), 80,
-            "GpuInstance must be 80 bytes (multiple of 16 for WGSL storage arrays)");
+            "GpuInstance stride must be 80 bytes (matches instance_layout array_stride)");
         assert_eq!(offset_of!(GpuInstance, transform),  0,
-            "transform matrix starts at byte 0");
+            "col0 attribute at shader_location 4 reads from offset 0");
         assert_eq!(offset_of!(GpuInstance, mat_index), 64,
-            "mat_index immediately follows the 64-byte matrix");
+            "mat_index attribute at shader_location 8 reads from offset 64");
         let _: &[u8] = bytemuck::bytes_of(&GpuInstance::zeroed());
     }
 
