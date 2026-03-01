@@ -33,6 +33,7 @@ Settings that let the user tune the renderer without editing code. Each item is 
 
 - **Emissive mesh lights** — treat triangles with emissive materials as area light sources and sample them explicitly via NEE. Currently only the IBL and the analytical directional sun are sampled; adding mesh lights enables candles, lamps, and neon signs to illuminate scenes correctly.
 - **Depth of field** — thin-lens model: jitter rays across a disc on the aperture and converge at a configurable focus distance. Adds cinematic bokeh with a focus distance slider in the UI.
+- **Reduce noise on rough dielectric surfaces** — rough non-metallic surfaces (plastic, stone, wood) show visible grain at low sample counts because the GGX BRDF lobe is wide and hard to importance-sample efficiently. Investigate cosine-weighted vs GGX-weighted hemisphere sampling, and consider MIS between BRDF and NEE to reduce variance without increasing sample count.
 - **Denoising** — integrate a denoising pass (either a WebGPU compute shader implementing a simple À-Trous or a port of OIDN) so that low sample counts (8–32 spp) produce a clean result. Would make the renderer much more interactive.
 - **Adaptive sampling** — allocate more samples to high-variance regions (edges, specular highlights, caustics) and fewer to flat diffuse areas. Achieves a given perceived quality with fewer total samples.
 - **Subsurface scattering** — approximate SSS for skin, wax, and foliage using a diffusion profile or a random-walk approximation. Required for realistic organic materials.
