@@ -1103,8 +1103,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // The sun is a Dirac delta (zero area from our perspective), so no
             // MIS weight is applied — the probability of a random BRDF scatter
             // sampling the sun exactly is effectively zero regardless of the BRDF.
+            //
+            // Skip the analytical sun when an HDR environment map is active (do_mis).
+            // HDR maps already contain a physical sun (or equivalent) and the env
+            // importance sampler handles it correctly. Running both simultaneously
+            // double-counts the sun: metallic specular highlights get 2–3× too much
+            // energy, spiking past the firefly clamp and producing persistent grain.
             let n_dot_sun = dot(n, SUN_DIR);
-            if n_dot_sun > 0.0 {
+            if n_dot_sun > 0.0 && !do_mis {
                 let shadow_orig = hit_pos + n * T_MIN;
                 let shadow_inv  = vec3(1.0 / SUN_DIR.x, 1.0 / SUN_DIR.y, 1.0 / SUN_DIR.z);
                 let shadow_hit  = traverse_bvh(shadow_orig, SUN_DIR, shadow_inv);
