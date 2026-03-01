@@ -238,6 +238,18 @@ impl Renderer {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("path tracer"),
+                    required_limits: wgpu::Limits {
+                        // The path tracer binds 10 storage buffers to the compute stage:
+                        // 8 read-only in group 0 (BVH, materials, textures, env map + CDFs)
+                        // and 2 read-write in group 1 (output pixels + float accumulator).
+                        // WebGPU's default limit is 8, which is enough for the rasteriser
+                        // but silently causes compute-pipeline creation to fail on Chrome
+                        // and Safari, which enforce that minimum strictly.  All M-series
+                        // and modern desktop GPUs support far more than 10; we just need
+                        // to ask explicitly so the browser doesn't cap us at 8.
+                        max_storage_buffers_per_shader_stage: 10,
+                        ..wgpu::Limits::default()
+                    },
                     ..Default::default()
                 },
             )
