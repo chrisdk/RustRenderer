@@ -360,6 +360,36 @@ fn ambient_color(N: vec3<f32>) -> vec3<f32> {
     return sky_ambient(N) * frame.ibl_scale;
 }
 
+/// Samples the environment in direction `dir`, blurred by averaging 5 points
+/// spread in a cone of half-angle `roughness * 0.9` radians. This approximates
+/// the GGX specular lobe average that the path tracer achieves by sampling
+/// many microfacet directions — without it, rough metallic surfaces show a
+/// crisp, vivid landscape reflection even when the lobe is 30–40° wide.
+///
+/// For mirrors (roughness < 0.08) returns a single sharp sample; the lobe is
+/// effectively a delta function and blurring would be wrong. Falls back to the
+/// sky_ambient gradient when no HDR env map is loaded.
+fn blurred_specular_env(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    if (frame.env_available == 0u) {
+        return sky_ambient(dir) * frame.ibl_scale;
+    }
+    let c0 = sample_env(dir);
+    if (roughness < 0.08) { return c0 * frame.ibl_scale; }
+
+    // Build an orthonormal tangent frame around `dir` for placing the four
+    // off-axis samples. Pick an "up" that isn't parallel to `dir`.
+    let up = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(dir.y) < 0.9);
+    let t1 = normalize(cross(up, dir));
+    let t2 = cross(dir, t1);
+    let s = roughness * 0.9;  // cone half-angle in radians (~52° at roughness=1)
+    let avg = (c0
+             + sample_env(normalize(dir + s * t1))
+             + sample_env(normalize(dir - s * t1))
+             + sample_env(normalize(dir + s * t2))
+             + sample_env(normalize(dir - s * t2))) * 0.2;
+    return avg * frame.ibl_scale;
+}
+
 /// ACES filmic tonemap (Narkowicz 2015 fit) followed by sRGB gamma encode.
 ///
 /// Shared by the geometry fragment shader (`fs_main`) and the sky background
@@ -472,7 +502,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse_ambient = albedo * env_N * (1.0 - metallic) * occlusion;
 
     // Specular ambient: Karis 2013 BRDF LUT amplitude × env colour,
-    // blended to approximate the GGX lobe spreading over rough surfaces.
+    // with a two-pronged fix for the "everything looks chrome" problem.
     //
     // AMPLITUDE (Karis LUT): Raw Schlick Fresnel approaches 1.0 at grazing
     // angles regardless of roughness, making every surface look chrome-plated.
@@ -481,24 +511,37 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // For rough surfaces, scale→0 and bias→0, correctly suppressing the
     // specular. This is an analytical fit; no texture lookup required.
     //
-    // COLOUR (roughness-weighted blend): Even with the correct amplitude, a
-    // single env-map sample at the mirror direction R snaps to whatever vivid
-    // sky or ground colour happens to be in that direction, creating a chrome
-    // look on rough surfaces. The path tracer avoids this by averaging many GGX
-    // samples over the full lobe; without a prefiltered env map we approximate
-    // it by mixing between ambient_color(R) (sharp mirror, correct for
-    // roughness=0) and ambient_color(N) (the same smooth direction the diffuse
-    // term already uses, correct for roughness=1). The mix weight is
-    // (1−roughness)² so even moderate roughness (0.6) already leans 84% toward
-    // the soft N sample, killing the landscape-mirror appearance while keeping
-    // smooth/metallic surfaces properly reflective.
+    // COLOUR — two complementary fixes:
+    //
+    // 1. Hard cutoff via `mirror_w`: surfaces with roughness ≥ 0.5 get zero
+    //    directional reflection and see only env_N (the same smooth direction
+    //    the diffuse term uses). mirror_w = pow(max(0, 1−roughness×2), 2) falls
+    //    to zero at roughness=0.5, eliminating landscape reflections on matte
+    //    and semi-rough surfaces entirely.
+    //
+    // 2. Cone blur via `blurred_specular_env`: for smoother surfaces where
+    //    mirror_w > 0, the sample at R is replaced by an average of 5 directions
+    //    in a cone of half-angle roughness×0.9 radians. This mimics the GGX
+    //    lobe spread the path tracer achieves by sampling many microfacet
+    //    directions. Without this blur, even 20% of a single sharp R sample can
+    //    show a vivid sky-vs-terrain edge as a clear reflection band.
     let brdf_c0  = vec4<f32>(-1.0, -0.0275, -0.572,  0.022);
     let brdf_c1  = vec4<f32>( 1.0,  0.0425,  1.04,  -0.04);
     let brdf_r   = roughness * brdf_c0 + brdf_c1;
     let brdf_a   = min(brdf_r.x * brdf_r.x, exp2(-9.28 * n_dot_v)) * brdf_r.x + brdf_r.y;
     let brdf_ab  = vec2<f32>(-1.04, 1.04) * brdf_a + brdf_r.zw;
-    let mirror_w     = (1.0 - roughness) * (1.0 - roughness);
-    let specular_env = mix(env_N, ambient_color(R), mirror_w);
+    // mirror_w: how much of the sharp reflection direction R contributes vs the
+    // smooth normal direction N. Falls to zero at roughness=0.5 so anything
+    // rougher sees only env_N — no directional landscape reflection at all.
+    // Uses pow(…, 2) for a smooth roll-off rather than a hard cutoff.
+    let mirror_w = pow(max(0.0, 1.0 - roughness * 2.0), 2.0);
+    var specular_env = env_N;
+    if (mirror_w > 0.005) {
+        // blurred_specular_env averages 5 directions around R (cone ∝ roughness)
+        // to approximate the GGX lobe spread; skip for rough surfaces where
+        // mirror_w ≈ 0 anyway to avoid the 5× texture cost for no benefit.
+        specular_env = mix(env_N, blurred_specular_env(R, roughness), mirror_w);
+    }
     let specular_ambient = (f0 * brdf_ab.x + brdf_ab.y) * specular_env * occlusion;
 
     let ambient = diffuse_ambient + specular_ambient;
