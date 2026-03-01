@@ -33,13 +33,10 @@ export function init_renderer(): Promise<void>;
 /**
  * Loads an HDR environment map from raw `.hdr` (Radiance RGBE) bytes.
  *
- * The environment map is used by the path tracer for background sky colour,
- * ambient lighting, and reflections in metallic surfaces. Call this after
- * `init_renderer`. Can be called again to swap environments without reloading
- * the scene.
- *
- * The rasteriser continues to use its procedural sky gradient; this only
- * affects the path-traced output from the "Render" button.
+ * The environment map is used by both the path tracer and the rasteriser
+ * preview for background sky colour, ambient lighting, and reflections in
+ * metallic surfaces. Call this after `init_renderer`. Can be called again
+ * to swap environments without reloading the scene.
  */
 export function load_environment(bytes: Uint8Array): void;
 
@@ -58,6 +55,10 @@ export function load_scene(bytes: Uint8Array): void;
  * This runs at 60 fps during interactive dragging. Unlike the path tracer
  * (`render`), it produces a single fully-formed frame with no progressive
  * accumulation — call `raster_get_pixels` immediately after to retrieve it.
+ *
+ * All user-adjustable controls (sun azimuth/elevation, sun intensity, exposure,
+ * IBL scale, IBL enabled/disabled, and any loaded HDR env map) are reflected in
+ * the preview frame just as they are in the path-traced output.
  *
  * Requires both `init_renderer` and `load_scene` to have been called first.
  */
@@ -95,6 +96,10 @@ export function render(width: number, height: number, sample_index: number, prev
  * neutral dark grey instead — giving a "studio lighting" look where the env
  * map still illuminates the scene but is not visible as the background.
  *
+ * Affects path-traced output only. The rasteriser does not render background
+ * sky pixels (they use the fixed clear colour); use `set_ibl_enabled` to
+ * toggle whether the env map is used for ambient shading in the preview.
+ *
  * Changes take effect on the next `render()` call. To avoid blending old and
  * new samples, start a fresh render by passing `sample_index = 0`.
  */
@@ -115,16 +120,18 @@ export function set_env_background(visible: boolean): void;
 export function set_exposure(stops: number): void;
 
 /**
- * Enables or disables Image-Based Lighting for path-traced renders.
+ * Enables or disables Image-Based Lighting.
  *
- * When `enabled` is `true` (the default), the loaded HDR environment map
- * is used for the background, ambient lighting, and reflections. When
- * `false`, the path tracer falls back to the procedural sky gradient even
- * if an env map is loaded — useful for A/B comparisons or artistic control.
+ * When `enabled` is `true` (the default), the loaded HDR environment map is
+ * used for ambient lighting and reflections in both the rasteriser preview and
+ * the path tracer. When `false`, both renderers fall back to the procedural sky
+ * gradient even if an env map is loaded — useful for A/B comparisons or artistic
+ * control.
  *
- * Has no effect on the rasteriser preview, which always uses its own
- * procedural sky. Changes take effect on the next `render()` call. To avoid
- * blending old and new samples, start a fresh render by passing `sample_index = 0`.
+ * Changes to the rasteriser preview take effect immediately on the next
+ * `raster_frame()` call. Changes to the path tracer take effect on the next
+ * `render()` call; start a fresh render (`sample_index = 0`) to avoid blending
+ * old (IBL) and new (procedural sky) samples.
  */
 export function set_ibl_enabled(enabled: boolean): void;
 
@@ -198,9 +205,9 @@ export function set_sun_intensity(scale: number): void;
  * Removes the currently loaded HDR environment map and reverts to the
  * procedural sky gradient.
  *
- * After this call the path tracer behaves as if `load_environment` had never
- * been called: background and IBL both come from the procedural sky. The
- * rasteriser preview is unaffected (it always uses its own procedural sky).
+ * After this call both the path tracer and the rasteriser preview behave as if
+ * `load_environment` had never been called: background and IBL both come from
+ * the procedural sky.
  *
  * This is a no-op if no environment map is currently loaded.
  */
@@ -229,6 +236,7 @@ export interface InitOutput {
     readonly init_renderer: () => any;
     readonly load_environment: (a: number, b: number) => [number, number];
     readonly load_scene: (a: number, b: number) => [number, number];
+    readonly raster_frame: (a: number, b: number) => void;
     readonly raster_get_pixels: (a: number, b: number) => any;
     readonly render: (a: number, b: number, c: number, d: number) => void;
     readonly set_env_background: (a: number) => void;
@@ -240,7 +248,6 @@ export interface InitOutput {
     readonly set_sun_elevation: (a: number) => void;
     readonly set_sun_intensity: (a: number) => void;
     readonly update_camera: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly raster_frame: (a: number, b: number) => void;
     readonly get_scene_bounds: () => any;
     readonly unload_environment: () => void;
     readonly wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7: (a: number, b: number) => void;
