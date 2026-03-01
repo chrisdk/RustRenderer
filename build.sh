@@ -11,7 +11,10 @@ tsc -p www/tsconfig.json
 # increasing build number. The script sets the text of #build-version in the
 # DOM so index.html never needs to be modified by the build process.
 echo "Injecting build version..."
-BUILD=$(git rev-list --count HEAD 2>/dev/null || echo "0")
+# +1 because build.sh runs before the publish commit is made, so the count
+# at this moment is N-1 relative to the commit that will contain these files.
+# Adding 1 makes the displayed number match the commit it ships in.
+BUILD=$(( $(git rev-list --count HEAD 2>/dev/null || echo "0") + 1 ))
 cat > www/dist/version.js << EOF
 (function () {
     var el = document.getElementById('build-version');
