@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+echo "Running Clippy..."
+cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
 echo "Building WASM..."
 wasm-pack build --target web --out-dir www/pkg
 

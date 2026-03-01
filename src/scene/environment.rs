@@ -87,6 +87,7 @@ pub fn decode_hdr(bytes: &[u8]) -> Result<HdrImage, String> {
         if magic[0] == 2 && magic[1] == 2 && scanline_width == width {
             // ── New RLE: four separate channel runs ───────────────────────────
             pos += 4;  // consume magic header
+            #[allow(clippy::needless_range_loop)]  // c indexes the inner [u8;4], not rgbe_buf
             for c in 0..4usize {
                 let mut x = 0usize;
                 while x < width as usize {

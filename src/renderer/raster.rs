@@ -47,7 +47,7 @@
 //!    rather than a storage buffer to comply with Chrome's
 //!    `maxStorageBuffersInVertexStage = 0` limit. Uses `depth_compare = Less`
 //!    + `depth_write_enabled = true` so geometry correctly overwrites sky
-//!    pixels and depth-tests between instances.
+//!      pixels and depth-tests between instances.
 
 use crate::camera::RasterCameraUniform;
 use crate::scene::{geometry::Vertex, material::Material, Scene};
@@ -175,6 +175,12 @@ pub struct RasterRenderer {
 // =============================================================================
 // Construction
 // =============================================================================
+
+impl Default for RasterRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RasterRenderer {
     /// Creates a new renderer with no scene loaded.

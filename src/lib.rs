@@ -480,7 +480,7 @@ pub fn render(width: u32, height: u32, sample_index: u32, preview: bool) {
     let ready = STATE.with(|s| {
         s.borrow()
             .as_ref()
-            .map_or(false, |s| s.renderer.is_scene_loaded())
+            .is_some_and(|s| s.renderer.is_scene_loaded())
     });
 
     if !ready {
@@ -551,7 +551,7 @@ pub fn raster_frame(width: u32, height: u32) {
     let ready = STATE.with(|s| {
         s.borrow()
             .as_ref()
-            .map_or(false, |s| s.raster.is_scene_loaded())
+            .is_some_and(|s| s.raster.is_scene_loaded())
     });
 
     if !ready {

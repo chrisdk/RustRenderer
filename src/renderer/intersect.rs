@@ -131,7 +131,7 @@ pub fn ray_triangle(
 
     // Compute barycentric coordinate u.
     let u = inv_det * dot(s, h);
-    if u < 0.0 || u > 1.0 {
+    if !(0.0..=1.0).contains(&u) {
         return None;
     }
 

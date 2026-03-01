@@ -837,8 +837,8 @@ impl Renderer {
             pass.set_bind_group(1, &frame_bg, &[]);
             // Workgroup size is 8×8; dispatch enough groups to cover every pixel.
             pass.dispatch_workgroups(
-                (width  + 7) / 8,
-                (height + 7) / 8,
+                width.div_ceil(8),
+                height.div_ceil(8),
                 1,
             );
         }
