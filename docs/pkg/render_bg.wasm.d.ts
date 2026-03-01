@@ -1,0 +1,28 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const get_pixels: (a: number, b: number) => any;
+export const init_renderer: () => any;
+export const load_environment: (a: number, b: number) => [number, number];
+export const load_scene: (a: number, b: number) => [number, number];
+export const raster_get_pixels: (a: number, b: number) => any;
+export const render: (a: number, b: number, c: number, d: number) => void;
+export const set_env_background: (a: number) => void;
+export const set_ibl_enabled: (a: number) => void;
+export const update_camera: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const raster_frame: (a: number, b: number) => void;
+export const get_scene_bounds: () => any;
+export const unload_environment: () => void;
+export const wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7: (a: number, b: number) => void;
+export const wasm_bindgen__closure__destroy__he5ef96efaea0f49b: (a: number, b: number) => void;
+export const wasm_bindgen__convert__closures_____invoke__h6b539ed7f51515d5: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen__convert__closures_____invoke__h1522f83d29e2ee84: (a: number, b: number, c: any, d: any) => void;
+export const wasm_bindgen__convert__closures_____invoke__h3d555e81212e6f69: (a: number, b: number, c: any) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

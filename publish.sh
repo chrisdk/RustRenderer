@@ -1,14 +1,15 @@
 #!/bin/bash
 #
-# publish.sh — build, stage, commit, and push everything to GitHub.
+# publish.sh — build, assemble docs/, commit, and push to GitHub Pages.
 #
 # Usage:
 #   ./publish.sh                        # commit message defaults to "Publish"
 #   ./publish.sh "Add FOV slider"       # custom commit message
 #
-# The script stages all tracked source files plus the compiled WASM and JS
-# artifacts. node_modules, /target, and other large generated directories
-# are excluded by .gitignore and are never touched.
+# www/ is the development workspace. This script copies only the files the
+# browser needs (index.html, compiled WASM, compiled JS, HDR assets) into
+# docs/, which is what GitHub Pages serves. Source files and build
+# intermediates never end up in docs/.
 
 set -e
 
@@ -17,22 +18,30 @@ MSG="${1:-Publish}"
 echo "==> Building..."
 ./build.sh
 
-# wasm-pack regenerates www/pkg/.gitignore on every build, which ignores
-# every file in that directory. Remove it so the compiled output is visible
-# to git and can be committed for GitHub Pages.
-rm -f www/pkg/.gitignore
+echo "==> Assembling docs/..."
+rm -rf docs
+mkdir -p docs
+cp    www/index.html docs/
+cp -r www/pkg        docs/
+cp -r www/dist       docs/
+cp -r www/assets     docs/
+
+# wasm-pack generates a .gitignore inside pkg/ that ignores everything in
+# that directory. Remove it so the compiled WASM is visible to git.
+rm -f docs/pkg/.gitignore
 
 echo "==> Staging..."
+# Stage the freshly assembled deployment directory.
+git add docs/
+# Stage any source-level changes (Rust, TypeScript, HTML, scripts, etc).
 git add \
     src/ \
-    www/src/ www/index.html www/pkg/ www/dist/ www/assets/ \
+    www/src/ www/index.html www/assets/ \
     BACKLOG.md \
     Cargo.toml Cargo.lock \
     build.sh run.sh publish.sh \
     .gitignore
-
-# Also pick up any other tracked files that have been modified (e.g. README,
-# CLAUDE.md, LICENSE) without accidentally sweeping in untracked junk.
+# Pick up modifications to any other already-tracked files (README, CLAUDE.md…).
 git add -u
 
 if git diff --cached --quiet; then
