@@ -1,4 +1,4 @@
 (function () {
     var el = document.getElementById('build-version');
-    if (el) el.textContent = 'build 106';
+    if (el) el.textContent = 'build 107';
 })();

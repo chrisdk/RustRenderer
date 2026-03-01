@@ -360,33 +360,44 @@ fn ambient_color(N: vec3<f32>) -> vec3<f32> {
     return sky_ambient(N) * frame.ibl_scale;
 }
 
-/// Samples the environment in direction `dir`, blurred by averaging 5 points
-/// spread in a cone of half-angle `roughness * 0.9` radians. This approximates
-/// the GGX specular lobe average that the path tracer achieves by sampling
-/// many microfacet directions — without it, rough metallic surfaces show a
-/// crisp, vivid landscape reflection even when the lobe is 30–40° wide.
+/// Samples the environment in direction `dir`, blurred by averaging 9 points
+/// in a 3×3 grid spread over a cone of half-angle `roughness * 2.0` radians.
 ///
-/// For mirrors (roughness < 0.08) returns a single sharp sample; the lobe is
-/// effectively a delta function and blurring would be wrong. Falls back to the
-/// sky_ambient gradient when no HDR env map is loaded.
+/// The path tracer approximates the specular integral by averaging many GGX-
+/// sampled directions across the lobe. At roughness=0.3 the GGX lobe spans
+/// roughly 60–90° end-to-end; a single env-map sample at R reproduces a crisp
+/// mirror reflection even on medium-rough metallic surfaces. The 3×3 grid with
+/// a wide cone (34° half-angle at roughness=0.3) averages across sky, horizon
+/// and terrain, giving the soft, blurred reflection the path tracer achieves
+/// without needing a prefiltered env map.
+///
+/// For near-mirrors (roughness < 0.05) returns a single sharp sample — blurring
+/// a delta-function lobe would be wrong. Falls back to sky_ambient when no HDR
+/// env map is loaded.
 fn blurred_specular_env(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
     if (frame.env_available == 0u) {
         return sky_ambient(dir) * frame.ibl_scale;
     }
     let c0 = sample_env(dir);
-    if (roughness < 0.08) { return c0 * frame.ibl_scale; }
+    if (roughness < 0.05) { return c0 * frame.ibl_scale; }
 
-    // Build an orthonormal tangent frame around `dir` for placing the four
-    // off-axis samples. Pick an "up" that isn't parallel to `dir`.
+    // Orthonormal tangent frame around `dir` for placing spread samples.
     let up = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(dir.y) < 0.9);
     let t1 = normalize(cross(up, dir));
     let t2 = cross(dir, t1);
-    let s = roughness * 0.9;  // cone half-angle in radians (~52° at roughness=1)
+    // Cardinal spread (axis-aligned) and diagonal spread (0.707 × axis).
+    let s  = roughness * 2.0;
+    let sd = s * 0.7071;
+    // 3×3 grid: center + 4 cardinal + 4 diagonal = 9 samples.
     let avg = (c0
-             + sample_env(normalize(dir + s * t1))
-             + sample_env(normalize(dir - s * t1))
-             + sample_env(normalize(dir + s * t2))
-             + sample_env(normalize(dir - s * t2))) * 0.2;
+             + sample_env(normalize(dir + s  * t1))
+             + sample_env(normalize(dir - s  * t1))
+             + sample_env(normalize(dir + s  * t2))
+             + sample_env(normalize(dir - s  * t2))
+             + sample_env(normalize(dir + sd * t1 + sd * t2))
+             + sample_env(normalize(dir - sd * t1 + sd * t2))
+             + sample_env(normalize(dir + sd * t1 - sd * t2))
+             + sample_env(normalize(dir - sd * t1 - sd * t2))) * (1.0 / 9.0);
     return avg * frame.ibl_scale;
 }
 
