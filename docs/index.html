@@ -501,7 +501,7 @@
                     </div>
                 </div>
 
-                <!-- Renderer tab: quality settings -->
+                <!-- Renderer tab: quality settings and lighting controls -->
                 <div class="tab-pane" id="tab-renderer">
                     <div class="ctrl-label">Samples per pixel</div>
                     <select id="sample-count">
@@ -510,6 +510,61 @@
                         <option value="256" selected>256 spp  — default</option>
                         <option value="512">512 spp  — high quality</option>
                     </select>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Max bounces</span>
+                            <span class="slider-value" id="bounces-value">12</span>
+                        </div>
+                        <input id="bounces-slider" type="range" min="2" max="16" value="12" step="1">
+                    </div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Exposure</span>
+                            <span class="slider-value" id="exposure-value">+0.0 EV</span>
+                        </div>
+                        <!-- Integer steps ×10 avoid float-step browser quirks; JS divides by 10. -->
+                        <input id="exposure-slider" type="range" min="-30" max="30" value="0" step="1">
+                    </div>
+
+                    <div class="ctrl-label" style="margin-top: 8px">Sun</div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Azimuth</span>
+                            <span class="slider-value" id="sun-az-value">63°</span>
+                        </div>
+                        <input id="sun-az-slider" type="range" min="0" max="360" value="63" step="1">
+                    </div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Elevation</span>
+                            <span class="slider-value" id="sun-el-value">66°</span>
+                        </div>
+                        <input id="sun-el-slider" type="range" min="0" max="90" value="66" step="1">
+                    </div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Intensity</span>
+                            <span class="slider-value" id="sun-int-value">1.0×</span>
+                        </div>
+                        <!-- Integer steps ×10; JS divides by 10 to give 0.0–5.0 range. -->
+                        <input id="sun-int-slider" type="range" min="0" max="50" value="10" step="1">
+                    </div>
+
+                    <div class="ctrl-label" style="margin-top: 8px">Environment / sky</div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">IBL brightness</span>
+                            <span class="slider-value" id="ibl-scale-value">1.0×</span>
+                        </div>
+                        <!-- Integer steps ×10; JS divides by 10 to give 0.0–4.0 range. -->
+                        <input id="ibl-scale-slider" type="range" min="0" max="40" value="10" step="1">
+                    </div>
                 </div>
 
                 <!-- Camera tab: FOV slider + reset -->

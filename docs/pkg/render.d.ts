@@ -101,6 +101,20 @@ export function render(width: number, height: number, sample_index: number, prev
 export function set_env_background(visible: boolean): void;
 
 /**
+ * Sets the display exposure in EV (Exposure Value) stops.
+ *
+ * Applied as `linear_colour × 2^stops` just before ACES tone-mapping.
+ * Because this is a post-accumulation transform, changing exposure does
+ * **not** invalidate the accumulated samples — the running total stays
+ * intact and the next `render` → `get_pixels` call will show the new
+ * brightness. This makes the exposure slider the only control that can
+ * update the live image mid-render without restarting.
+ *
+ * +1 EV = twice as bright; −1 EV = half as bright. Typical range: −3 to +3.
+ */
+export function set_exposure(stops: number): void;
+
+/**
  * Enables or disables Image-Based Lighting for path-traced renders.
  *
  * When `enabled` is `true` (the default), the loaded HDR environment map
@@ -113,6 +127,72 @@ export function set_env_background(visible: boolean): void;
  * blending old and new samples, start a fresh render by passing `sample_index = 0`.
  */
 export function set_ibl_enabled(enabled: boolean): void;
+
+/**
+ * Sets the IBL / sky brightness multiplier.
+ *
+ * `scale` multiplies all environment-map and procedural-sky contributions:
+ * the visible background (when `env_background` is enabled), BRDF-sampled
+ * escape rays, and the explicit env NEE shadow rays. It does **not** affect
+ * emissive surfaces or the analytical sun.
+ *
+ * 0.0 = pitch-black environment; 1.0 = physical default; 2.0 = twice as
+ * bright. Useful for quickly brightening a dim HDR map without editing
+ * the file, or dimming the sky to match an indoor lighting scenario.
+ */
+export function set_ibl_scale(scale: number): void;
+
+/**
+ * Sets the maximum number of path-tracing bounces per sample.
+ *
+ * The value is clamped to `[2, 16]`: 2 is the minimum for any meaningful
+ * indirect lighting (direct hit + one bounce), and 16 is enough to resolve
+ * glass caustics and multi-room interiors without wasting GPU time on paths
+ * that contribute almost nothing (Russian roulette handles the tail).
+ *
+ * Changes take effect on the next `render()` call. Start a new render
+ * (`sample_index = 0`) to avoid blending old (high-bounce) and new
+ * (low-bounce) samples together.
+ */
+export function set_max_bounces(n: number): void;
+
+/**
+ * Sets the sun azimuth angle.
+ *
+ * `degrees` is measured in the horizontal plane from the +Z axis toward
+ * the +X axis (0° = due north / +Z, 90° = due east / +X). The shader
+ * converts to a world-space direction at render time, so changing this
+ * does not require re-uploading any buffers.
+ *
+ * Valid range: 0–360°. Values outside this range are accepted and wrap
+ * correctly via trigonometry.
+ */
+export function set_sun_azimuth(degrees: number): void;
+
+/**
+ * Sets the sun elevation angle above the horizon.
+ *
+ * `degrees` = 0 puts the sun on the horizon; `degrees` = 90 puts it
+ * directly overhead. Values are clamped by the shader's trig (a negative
+ * elevation would just make the sun a below-horizon fill light, which is
+ * unusual but physically plausible).
+ *
+ * Valid range: 0–90°.
+ */
+export function set_sun_elevation(degrees: number): void;
+
+/**
+ * Sets the sun intensity multiplier.
+ *
+ * `scale` directly multiplies `SUN_RADIANCE` in the shader's NEE
+ * (Next Event Estimation) sun contribution. 0.0 effectively disables the
+ * analytical sun; 1.0 is the physical default; values above 1.0 simulate
+ * a brighter or harsher light source.
+ *
+ * Has no effect when an HDR environment map is active (the env map's own
+ * sun is used instead via importance sampling).
+ */
+export function set_sun_intensity(scale: number): void;
 
 /**
  * Removes the currently loaded HDR environment map and reverts to the
@@ -152,7 +232,13 @@ export interface InitOutput {
     readonly raster_get_pixels: (a: number, b: number) => any;
     readonly render: (a: number, b: number, c: number, d: number) => void;
     readonly set_env_background: (a: number) => void;
+    readonly set_exposure: (a: number) => void;
     readonly set_ibl_enabled: (a: number) => void;
+    readonly set_ibl_scale: (a: number) => void;
+    readonly set_max_bounces: (a: number) => void;
+    readonly set_sun_azimuth: (a: number) => void;
+    readonly set_sun_elevation: (a: number) => void;
+    readonly set_sun_intensity: (a: number) => void;
     readonly update_camera: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly raster_frame: (a: number, b: number) => void;
     readonly get_scene_bounds: () => any;

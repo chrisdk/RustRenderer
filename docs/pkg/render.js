@@ -149,6 +149,23 @@ export function set_env_background(visible) {
 }
 
 /**
+ * Sets the display exposure in EV (Exposure Value) stops.
+ *
+ * Applied as `linear_colour × 2^stops` just before ACES tone-mapping.
+ * Because this is a post-accumulation transform, changing exposure does
+ * **not** invalidate the accumulated samples — the running total stays
+ * intact and the next `render` → `get_pixels` call will show the new
+ * brightness. This makes the exposure slider the only control that can
+ * update the live image mid-render without restarting.
+ *
+ * +1 EV = twice as bright; −1 EV = half as bright. Typical range: −3 to +3.
+ * @param {number} stops
+ */
+export function set_exposure(stops) {
+    wasm.set_exposure(stops);
+}
+
+/**
  * Enables or disables Image-Based Lighting for path-traced renders.
  *
  * When `enabled` is `true` (the default), the loaded HDR environment map
@@ -163,6 +180,87 @@ export function set_env_background(visible) {
  */
 export function set_ibl_enabled(enabled) {
     wasm.set_ibl_enabled(enabled);
+}
+
+/**
+ * Sets the IBL / sky brightness multiplier.
+ *
+ * `scale` multiplies all environment-map and procedural-sky contributions:
+ * the visible background (when `env_background` is enabled), BRDF-sampled
+ * escape rays, and the explicit env NEE shadow rays. It does **not** affect
+ * emissive surfaces or the analytical sun.
+ *
+ * 0.0 = pitch-black environment; 1.0 = physical default; 2.0 = twice as
+ * bright. Useful for quickly brightening a dim HDR map without editing
+ * the file, or dimming the sky to match an indoor lighting scenario.
+ * @param {number} scale
+ */
+export function set_ibl_scale(scale) {
+    wasm.set_ibl_scale(scale);
+}
+
+/**
+ * Sets the maximum number of path-tracing bounces per sample.
+ *
+ * The value is clamped to `[2, 16]`: 2 is the minimum for any meaningful
+ * indirect lighting (direct hit + one bounce), and 16 is enough to resolve
+ * glass caustics and multi-room interiors without wasting GPU time on paths
+ * that contribute almost nothing (Russian roulette handles the tail).
+ *
+ * Changes take effect on the next `render()` call. Start a new render
+ * (`sample_index = 0`) to avoid blending old (high-bounce) and new
+ * (low-bounce) samples together.
+ * @param {number} n
+ */
+export function set_max_bounces(n) {
+    wasm.set_max_bounces(n);
+}
+
+/**
+ * Sets the sun azimuth angle.
+ *
+ * `degrees` is measured in the horizontal plane from the +Z axis toward
+ * the +X axis (0° = due north / +Z, 90° = due east / +X). The shader
+ * converts to a world-space direction at render time, so changing this
+ * does not require re-uploading any buffers.
+ *
+ * Valid range: 0–360°. Values outside this range are accepted and wrap
+ * correctly via trigonometry.
+ * @param {number} degrees
+ */
+export function set_sun_azimuth(degrees) {
+    wasm.set_sun_azimuth(degrees);
+}
+
+/**
+ * Sets the sun elevation angle above the horizon.
+ *
+ * `degrees` = 0 puts the sun on the horizon; `degrees` = 90 puts it
+ * directly overhead. Values are clamped by the shader's trig (a negative
+ * elevation would just make the sun a below-horizon fill light, which is
+ * unusual but physically plausible).
+ *
+ * Valid range: 0–90°.
+ * @param {number} degrees
+ */
+export function set_sun_elevation(degrees) {
+    wasm.set_sun_elevation(degrees);
+}
+
+/**
+ * Sets the sun intensity multiplier.
+ *
+ * `scale` directly multiplies `SUN_RADIANCE` in the shader's NEE
+ * (Next Event Estimation) sun contribution. 0.0 effectively disables the
+ * analytical sun; 1.0 is the physical default; values above 1.0 simulate
+ * a brighter or harsher light source.
+ *
+ * Has no effect when an HDR environment map is active (the env map's own
+ * sun is used instead via importance sampling).
+ * @param {number} scale
+ */
+export function set_sun_intensity(scale) {
+    wasm.set_sun_intensity(scale);
 }
 
 /**
@@ -1015,12 +1113,12 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 492, function: Function { arguments: [Externref], shim_idx: 493, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 493, function: Function { arguments: [Externref], shim_idx: 494, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7, wasm_bindgen__convert__closures_____invoke__h3d555e81212e6f69);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 498, function: Function { arguments: [Externref], shim_idx: 499, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 499, function: Function { arguments: [Externref], shim_idx: 500, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__he5ef96efaea0f49b, wasm_bindgen__convert__closures_____invoke__h6b539ed7f51515d5);
             return ret;
         },
