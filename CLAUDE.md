@@ -52,6 +52,7 @@ www/
   tsconfig.json
 build.sh                 wasm-pack + tsc
 run.sh                   build.sh then python3 HTTP server on :8080
+publish.sh               build, assemble docs/, commit, push to GitHub Pages
 ```
 
 ## Key types
@@ -120,6 +121,23 @@ run.sh                   build.sh then python3 HTTP server on :8080
 2. **Texture maps in the rasterizer** — currently uses solid `base_color_factor` only; sampling the full texture array would make the preview match the path-tracer output better
 3. **Depth of field** — thin-lens model: sample a disc on the aperture and converge at a focus distance
 4. **Emissive mesh lights** — area lights from geometry with emissive materials; currently only IBL + analytical sun
+
+## Publishing
+
+The app is hosted on GitHub Pages from the `docs/` directory of the `main` branch.
+
+```bash
+./publish.sh                          # builds, assembles docs/, commits, pushes
+./publish.sh "Add FOV slider"         # same with a custom commit message
+```
+
+What the script does:
+1. Runs `build.sh` (wasm-pack + tsc).
+2. Wipes and rebuilds `docs/` from `www/` — copies `index.html`, `pkg/` (compiled WASM + JS bindings), `dist/` (compiled TypeScript), and `assets/` (HDR files etc.). Source files and build intermediates are never included.
+3. Removes `docs/pkg/.gitignore` — wasm-pack generates one that would hide the compiled WASM from git.
+4. Stages `docs/` plus all tracked source files, commits, and pushes.
+
+Live URL: **https://chrisdk.github.io/RustRenderer/**
 
 ## License
 
