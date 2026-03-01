@@ -573,11 +573,17 @@ fn traverse_bvh(
 // Sky / environment
 // ============================================================================
 
-// Samples the HDR environment map using an equirectangular (lat-long) mapping.
+// Samples the HDR environment map using an equirectangular (lat-long) mapping,
+// with bilinear filtering.
 //
 // Standard convention used by Poly Haven and most HDRI tools:
 //   longitude = atan2(dir.x, -dir.z)  →  U = 0.5 at -Z (camera forward)
 //   latitude  = asin(dir.y)           →  V = 0 at top (+Y), 1 at bottom (-Y)
+//
+// Bilinear filtering is crucial for smooth reflections in metallic surfaces.
+// Without it, adjacent surface normals with tiny angular differences can sample
+// completely different env map pixels, creating a stippled grain that persists
+// even at high sample counts.
 fn sample_env(dir: vec3<f32>) -> vec3<f32> {
     let phi   = atan2(dir.x, -dir.z);                   // [-π, π]
     let theta = asin(clamp(dir.y, -0.9999, 0.9999));    // [-π/2, π/2]
@@ -585,9 +591,31 @@ fn sample_env(dir: vec3<f32>) -> vec3<f32> {
     let u = phi   / TWO_PI + 0.5;           // [0, 1]
     let v = 0.5   - theta  / PI;            // [0, 1], 0 = top
 
-    let px = min(u32(u * f32(frame.env_width)),  frame.env_width  - 1u);
-    let py = min(u32(v * f32(frame.env_height)), frame.env_height - 1u);
-    return env_pixels[py * frame.env_width + px].rgb;
+    let W = frame.env_width;
+    let H = frame.env_height;
+
+    // Map to texel space, offset -0.5 for texel-centre alignment.
+    let uf = u * f32(W) - 0.5;
+    let vf = v * f32(H) - 0.5;
+
+    let x0i = i32(floor(uf));
+    let y0i = i32(floor(vf));
+
+    // Wrap U (equirectangular is periodic), clamp V (poles).
+    let x0 = u32(((x0i     % i32(W)) + i32(W)) % i32(W));
+    let x1 = u32(((x0i + 1 % i32(W)) + i32(W)) % i32(W));
+    let y0 = u32(clamp(y0i,     0, i32(H) - 1));
+    let y1 = u32(clamp(y0i + 1, 0, i32(H) - 1));
+
+    let fx = clamp(uf - f32(x0i), 0.0, 1.0);
+    let fy = clamp(vf - f32(y0i), 0.0, 1.0);
+
+    let p00 = env_pixels[y0 * W + x0].rgb;
+    let p10 = env_pixels[y0 * W + x1].rgb;
+    let p01 = env_pixels[y1 * W + x0].rgb;
+    let p11 = env_pixels[y1 * W + x1].rgb;
+
+    return mix(mix(p00, p10, fx), mix(p01, p11, fx), fy);
 }
 
 // Returns the radiance for a ray that escaped the scene without hitting
@@ -1083,10 +1111,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let f0 = mix(vec3(0.04), albedo, metallic);
             let F_approx = fresnel_schlick(n_dot_v, f0);
 
-            // Probability of taking the specular path. Clamp away from 0 and 1
-            // to avoid zero-probability (division by zero) and 100% one-path scenarios.
-            // Precomputed here so both the env NEE and scatter sections can use it.
-            let p_spec = clamp(luminance(F_approx), 0.04, 0.96);
+            // Probability of taking the specular path.
+            //
+            // Using luminance(F) alone breaks for dark metallic surfaces: a dark
+            // olive-green metal (metallic=1, albedo=[0.02,0.05,0.01]) has
+            // luminance(f0) ≈ 0.04, so p_spec clamps to 0.04. That means 96 % of
+            // paths take the diffuse branch, multiply throughput by
+            // (1–metallic)*albedo*(1–F) = 0, and die — contributing nothing but
+            // consuming a sample slot. The surviving 4 % get a 25× Fresnel boost
+            // at grazing angles, producing explosive variance that never converges.
+            //
+            // Fix: take max(metallic, luminance(F)) so fully metallic surfaces always
+            // sample the specular lobe. The diffuse branch can still fire (4 % of the
+            // time) and correctly returns zero throughput, but variance is contained.
+            let p_spec = clamp(max(metallic, luminance(F_approx)), 0.04, 0.96);
 
             // ── Direct sun lighting (Next Event Estimation) ───────────────────
             //
