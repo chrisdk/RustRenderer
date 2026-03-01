@@ -32,6 +32,9 @@
 //   binding 2 : array<Material>    — PBR materials indexed by triangle
 //   binding 3 : array<u32>         — flat RGBA8 pixel data for all textures
 //   binding 4 : array<TexInfo>     — per-texture offset, width, height
+//   binding 5 : array<vec4<f32>>   — HDR env map pixels (equirectangular, linear)
+//   binding 6 : array<f32>         — env marginal CDF over rows
+//   binding 7 : array<f32>         — env conditional CDFs (row-major, W entries/row)
 // Group 1 — per-frame data (updated every dispatch)
 //   binding 0 : Camera uniform     — camera position + pre-scaled basis
 //   binding 1 : FrameUniforms      — output width, height, sample index
@@ -132,11 +135,13 @@ struct FrameUniforms {
     env_width:    u32,
     env_height:   u32,
     // 1 = show env map / sky as background; 0 = dark grey for missed rays.
-    // When 0, escaped rays contribute dark grey to the path, effectively
-    // disabling the visible background while still allowing the env map to
-    // light the scene through secondary bounces (as long as IBL is on).
-    env_background: u32,
-    _pad0:          u32,
+    // With MIS, escaped secondary rays only contribute the env if env_background
+    // == 1; env NEE at surface hits still provides IBL regardless of this flag.
+    env_background:    u32,
+    // MIS normalisation constant: W·H / (total_sin_weighted_lum · 2π²).
+    // pdf_solid_angle(dir) = luminance(env_sample(dir)) * env_sample_weight.
+    // Zero when no env map is loaded — disables env NEE and MIS in the shader.
+    env_sample_weight: f32,
 }
 
 // ============================================================================
@@ -150,7 +155,15 @@ struct FrameUniforms {
 @group(0) @binding(4) var<storage, read>       tex_info:   array<TexInfo>;
 /// HDR environment map pixels as linear-light vec4<f32> (A component unused).
 /// Row-major, frame.env_width × frame.env_height. One black pixel when not loaded.
-@group(0) @binding(5) var<storage, read>       env_pixels: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read>       env_pixels:         array<vec4<f32>>;
+/// Marginal CDF over env map rows: env_marginal_cdf[y] = P(row ≤ y).
+/// Used for the first stage of 2-D importance sampling (choose a row).
+/// One f32 per row; length = frame.env_height when loaded, 1 otherwise.
+@group(0) @binding(6) var<storage, read>       env_marginal_cdf:    array<f32>;
+/// Per-row conditional CDFs: env_conditional_cdf[y*W+x] = P(col ≤ x | row=y).
+/// Used for the second stage (choose a column given the row).
+/// Length = frame.env_width × frame.env_height when loaded, 1 otherwise.
+@group(0) @binding(7) var<storage, read>       env_conditional_cdf: array<f32>;
 
 @group(1) @binding(0) var<uniform>             camera:  Camera;
 @group(1) @binding(1) var<uniform>             frame:   FrameUniforms;
@@ -530,6 +543,152 @@ fn sky_color(dir: vec3<f32>) -> vec3<f32> {
 }
 
 // ============================================================================
+// Multiple Importance Sampling (MIS) helpers
+// ============================================================================
+
+// Power heuristic (Veach 1997, β=2). Blends two sampling strategies with PDF
+// `pdf_a` and `pdf_b` so that the combined estimator minimises variance.
+//
+// w(a, b) = a² / (a² + b²)
+//
+// β=2 is more aggressive than the balance heuristic (β=1): it down-weights the
+// lower-PDF strategy harder, which reduces variance when the two PDFs are very
+// different in magnitude. For IBL + BRDF this is almost always the right choice.
+fn power_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
+    let a2 = pdf_a * pdf_a;
+    let b2 = pdf_b * pdf_b;
+    return a2 / (a2 + b2);
+}
+
+// Importance-sample the environment map using the pre-built 2-D CDF.
+//
+// Returns vec4(direction.xyz, pdf_solid_angle). The direction is the world-space
+// direction of the sampled env pixel; pdf is in solid-angle measure so it can be
+// compared directly with BRDF PDFs in the power heuristic.
+//
+// Algorithm: two-stage inversion method.
+//   1. Binary-search the marginal CDF (over rows) for a row index.
+//   2. Binary-search the conditional CDF (over columns within that row).
+//   3. Convert the pixel centre (col, row) back to a direction via the inverse
+//      of the equirectangular latitude-longitude mapping used in sample_env().
+fn sample_env_importance(xi: vec2<f32>) -> vec4<f32> {
+    let W = frame.env_width;
+    let H = frame.env_height;
+
+    // ── Stage 1: find row via marginal CDF binary search ─────────────────────
+    // Lower-bound search: first index where cdf[mid] >= xi.x.
+    var row_lo = 0u; var row_hi = H;
+    while row_lo < row_hi {
+        let mid = (row_lo + row_hi) >> 1u;
+        if env_marginal_cdf[mid] < xi.x { row_lo = mid + 1u; } else { row_hi = mid; }
+    }
+    let row = min(row_lo, H - 1u);
+
+    // ── Stage 2: find column via conditional CDF binary search ────────────────
+    let row_off = row * W;
+    var col_lo = 0u; var col_hi = W;
+    while col_lo < col_hi {
+        let mid = (col_lo + col_hi) >> 1u;
+        if env_conditional_cdf[row_off + mid] < xi.y { col_lo = mid + 1u; } else { col_hi = mid; }
+    }
+    let col = min(col_lo, W - 1u);
+
+    // ── Convert pixel centre to world-space direction ─────────────────────────
+    // Inverse of sample_env()'s direction → UV mapping:
+    //   phi   = atan2(dir.x, -dir.z)  →  u = phi/(2π) + 0.5
+    //   theta = asin(dir.y)           →  v = 0.5 - theta/π
+    // Rearranging: phi = (u-0.5)·2π, theta = (0.5-v)·π (latitude, not polar).
+    //   dir.y = sin(theta)
+    //   dir.x = cos(theta)·sin(phi)    from phi = atan2(dir.x, -dir.z)
+    //   dir.z = -cos(theta)·cos(phi)
+    let u = (f32(col) + 0.5) / f32(W);
+    let v = (f32(row) + 0.5) / f32(H);
+    let phi     = (u - 0.5) * TWO_PI;
+    let lat     = (0.5 - v) * PI;         // latitude = asin(dir.y)
+    let cos_lat = cos(lat);
+    let dir     = normalize(vec3(cos_lat * sin(phi), sin(lat), -cos_lat * cos(phi)));
+
+    // ── PDF in solid-angle measure ────────────────────────────────────────────
+    // pdf_ω = luminance(pixel) * env_sample_weight.
+    // (The sin(θ) terms cancel between pdf_pixel and dω — see build_env_cdfs.)
+    let pix_lum = luminance(env_pixels[row * W + col].rgb);
+    let pdf     = max(pix_lum * frame.env_sample_weight, 0.0);
+
+    return vec4(dir, pdf);
+}
+
+// Evaluate the PDF of sampling direction `dir` under the env-map distribution.
+//
+// Used in the miss case to compute the MIS weight for BRDF-sampled escape rays:
+// once we know the ray escaped to the env, we ask "what PDF would the env
+// importance sampler have assigned to this direction?" and blend accordingly.
+fn eval_env_pdf(dir: vec3<f32>) -> f32 {
+    if frame.env_sample_weight <= 0.0 { return 0.0; }
+    return luminance(sample_env(dir)) * frame.env_sample_weight;
+}
+
+// Evaluate the combined diffuse+specular BRDF × cos(θ_i) for direction `l`
+// given viewer `v`, surface normal `n`, linearised roughness `alpha`,
+// Fresnel F0 `f0`, base colour `albedo`, and metallic factor `metallic`.
+//
+// Returns `(f_diffuse + f_specular) * dot(n, l)` — the integrand factor for
+// the rendering equation (BRDF times the projected solid angle cosine term).
+// This is what gets multiplied by env_radiance and divided by pdf_env when
+// evaluating the explicit NEE contribution.
+fn eval_brdf_f(
+    l:       vec3<f32>,  // incident direction (toward light)
+    n:       vec3<f32>,  // shading normal
+    v:       vec3<f32>,  // view direction (toward camera)
+    alpha:   f32,        // linearised roughness = roughness²
+    f0:      vec3<f32>,  // Fresnel reflectance at normal incidence
+    albedo:  vec3<f32>,
+    metallic: f32,
+) -> vec3<f32> {
+    let n_dot_l = max(dot(n, l), 0.0);
+    if n_dot_l <= 0.0 { return vec3(0.0); }
+
+    let h       = normalize(v + l);
+    let n_dot_v = max(dot(n, v), 0.0001);
+    let n_dot_h = max(dot(n, h), 0.0001);
+    let v_dot_h = max(dot(v, h), 0.0001);
+
+    let F        = fresnel_schlick(v_dot_h, f0);
+    let D        = d_ggx(n_dot_h, alpha);
+    let G        = smith_g2(n_dot_v, n_dot_l, alpha);
+    let specular = F * D * G / max(4.0 * n_dot_v * n_dot_l, 0.0001);
+    let diffuse  = (1.0 - metallic) * albedo * (vec3(1.0) - F) * INV_PI;
+
+    return (specular + diffuse) * n_dot_l;
+}
+
+// Evaluate the mixed BRDF PDF for direction `l`, combining the GGX specular
+// lobe (sampled with probability `p_spec`) and the cosine-weighted diffuse
+// hemisphere (sampled with probability `1 - p_spec`).
+//
+// This is the "partner PDF" used when env-map importance sampling selects a
+// direction: we need to know how likely the BRDF path would have been to
+// send a ray in that direction in order to compute the power heuristic weight.
+fn eval_brdf_pdf(
+    l:      vec3<f32>,  // candidate direction (toward light)
+    n:      vec3<f32>,  // shading normal
+    v:      vec3<f32>,  // view direction
+    alpha:  f32,        // linearised roughness
+    p_spec: f32,        // probability of taking the specular branch
+) -> f32 {
+    let n_dot_l = max(dot(n, l), 0.0);
+    let h       = normalize(v + l);
+    let n_dot_h = max(dot(n, h), 0.0001);
+    let v_dot_h = max(dot(v, h), 0.0001);
+
+    // GGX specular PDF: D(H)·(N·H) / (4·V·H), where H = normalize(V+L).
+    let pdf_spec = d_ggx(n_dot_h, alpha) * n_dot_h / (4.0 * v_dot_h);
+    // Lambertian diffuse PDF: cos(θ_l) / π.
+    let pdf_diff = n_dot_l * INV_PI;
+
+    return p_spec * pdf_spec + (1.0 - p_spec) * pdf_diff;
+}
+
+// ============================================================================
 // Normal mapping
 // ============================================================================
 
@@ -654,24 +813,52 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let preview_mode = (frame.flags & 1u) != 0u;
     let max_bounces  = select(MAX_BOUNCES, PREVIEW_BOUNCES, preview_mode);
 
+    // MIS is active when an env map is loaded, IBL is enabled, AND we are not
+    // in preview mode (preview prioritises speed over accuracy).
+    let ibl_disabled = (frame.flags & 2u) != 0u;
+    let do_mis = !preview_mode && frame.env_width > 0u && !ibl_disabled
+              && frame.env_sample_weight > 0.0;
+
     var throughput = vec3(1.0);
     var radiance   = vec3(0.0);
+
+    // BRDF PDF of the ray that arrived at the current bounce.
+    //
+    // Set to -1.0 when there is no valid BRDF PDF for the arriving ray:
+    //   • Before the first hit (primary camera ray — no previous scatter).
+    //   • After a glass bounce (Dirac-delta transmissive/reflective BRDF).
+    // When >= 0, the value is used in the miss case to weight the implicit
+    // env-map contribution against the explicit env NEE from the previous hit.
+    var mis_brdf_pdf: f32 = -1.0;
 
     for (var bounce: i32 = 0; bounce < max_bounces; bounce++) {
         let inv_dir = vec3(1.0 / ray_dir.x, 1.0 / ray_dir.y, 1.0 / ray_dir.z);
         let hit = traverse_bvh(ray_orig, ray_dir, inv_dir);
 
         if hit.hit == 0u {
-            // Ray escaped the scene entirely. Whether we see the environment
-            // or a neutral dark grey is controlled by the env_background flag.
+            // ── Ray escaped the scene ─────────────────────────────────────────
             //
-            // When the background is hidden (env_background == 0), secondary
-            // bounce rays that escape still contribute dark grey — this does
-            // suppress IBL from escaped secondaries.  A full fix would require
-            // separating background visibility from IBL sampling (MIS), which
-            // is on the roadmap.  For now the toggle is a quick artistic control.
+            // With MIS, the env map is sampled explicitly (NEE) at each surface
+            // hit, so escaped rays get a MIS weight that prevents double-counting
+            // the same env light through both strategies.
+            //
+            // When env_background == 0, the user wants IBL lighting without a
+            // visible background. The env NEE at surface hits still runs (giving
+            // indirect IBL), but the escaped ray contributes dark grey — so the
+            // background stays dark and only geometry lit by the env map is lit.
             if frame.env_background == 1u {
-                radiance += throughput * sky_color(ray_dir);
+                let env_rad = sky_color(ray_dir);
+                if do_mis && mis_brdf_pdf >= 0.0 {
+                    // Weight the implicit BRDF-sampled env contribution against the
+                    // explicit env NEE that fired at the previous surface hit.
+                    // If the env PDF is near zero (black direction), give full weight
+                    // to the implicit path to avoid losing dark-region IBL.
+                    let pdf_env = eval_env_pdf(ray_dir);
+                    let w = select(1.0, power_heuristic(mis_brdf_pdf, pdf_env), pdf_env > 1e-8);
+                    radiance += throughput * env_rad * w;
+                } else {
+                    radiance += throughput * env_rad;
+                }
             } else {
                 // Dark studio grey: neutral but not pitch-black so silhouettes
                 // remain legible against the background.
@@ -799,6 +986,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
+            // Glass uses a Dirac-delta BRDF — the transmitted/reflected direction
+            // is determined exactly, not from a PDF. MIS requires a finite PDF to
+            // compare against the env PDF, so disable it for the next bounce.
+            mis_brdf_pdf = -1.0;
+
             // Offset origin slightly in the transmission direction so the next
             // bounce starts on the correct side of the surface.
             ray_orig = hit_pos + new_dir * (T_MIN * 10.0);
@@ -818,6 +1010,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let f0 = mix(vec3(0.04), albedo, metallic);
             let F_approx = fresnel_schlick(n_dot_v, f0);
 
+            // Probability of taking the specular path. Clamp away from 0 and 1
+            // to avoid zero-probability (division by zero) and 100% one-path scenarios.
+            // Precomputed here so both the env NEE and scatter sections can use it.
+            let p_spec = clamp(luminance(F_approx), 0.04, 0.96);
+
             // ── Direct sun lighting (Next Event Estimation) ───────────────────
             //
             // Fire one shadow ray toward the sun at every opaque surface hit.
@@ -829,6 +1026,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // most pixels stay dark and a few are explosively bright — classic
             // Monte Carlo variance. NEE trades that for one extra BVH traversal
             // per bounce and a completely smooth direct-lighting result.
+            //
+            // The sun is a Dirac delta (zero area from our perspective), so no
+            // MIS weight is applied — the probability of a random BRDF scatter
+            // sampling the sun exactly is effectively zero regardless of the BRDF.
             let n_dot_sun = dot(n, SUN_DIR);
             if n_dot_sun > 0.0 {
                 let shadow_orig = hit_pos + n * T_MIN;
@@ -859,9 +1060,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
-            // Probability of taking the specular path. Clamp away from 0 and 1
-            // to avoid zero-probability (division by zero) and 100% one-path scenarios.
-            let p_spec = clamp(luminance(F_approx), 0.04, 0.96);
+            // ── Environment NEE (MIS explicit sampling) ───────────────────────
+            //
+            // When an HDR env map is loaded and IBL is enabled, fire a shadow ray
+            // toward an importance-sampled env direction. This is the "explicit"
+            // half of the two-strategy MIS estimator — the "implicit" half is the
+            // BRDF-sampled ray that reaches the env in the miss case.
+            //
+            // Power heuristic weight:
+            //   w_env = pdf_env² / (pdf_env² + pdf_brdf²)
+            //
+            // For a smooth metallic surface pointing directly at a bright env
+            // pixel, pdf_brdf is high (BRDF sampler would likely pick that
+            // direction anyway) and pdf_env is moderate, so w_env is lower —
+            // the explicit NEE contributes less because the BRDF sampler already
+            // handles it well.  For rough diffuse surfaces, pdf_brdf is broadly
+            // spread but pdf_env is concentrated on bright pixels, so w_env ≈ 1
+            // and NEE gives all the bright contribution — exactly what's needed
+            // to avoid fireflies.
+            if do_mis {
+                let env_sample = sample_env_importance(rand2(&seed));
+                let env_dir    = env_sample.xyz;
+                let pdf_env    = env_sample.w;
+                let n_dot_env  = dot(n, env_dir);
+
+                if n_dot_env > 0.0 && pdf_env > 1e-8 {
+                    let env_shadow_orig = hit_pos + n * T_MIN;
+                    let env_inv_dir     = vec3(1.0 / env_dir.x, 1.0 / env_dir.y, 1.0 / env_dir.z);
+                    let env_shadow_hit  = traverse_bvh(env_shadow_orig, env_dir, env_inv_dir);
+
+                    if env_shadow_hit.hit == 0u {
+                        let env_radiance = sample_env(env_dir);
+                        let pdf_brdf     = eval_brdf_pdf(env_dir, n, v_dir, alpha, p_spec);
+                        let w_env        = power_heuristic(pdf_env, pdf_brdf);
+                        let brdf_f       = eval_brdf_f(env_dir, n, v_dir, alpha, f0, albedo, metallic);
+                        radiance += throughput * brdf_f * env_radiance / pdf_env * w_env;
+                    }
+                }
+            }
 
             var new_dir: vec3<f32>;
 
@@ -898,6 +1134,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 throughput *= F_spec * vis_weight / p_spec;
 
+                // Store this bounce's BRDF PDF for use in the next miss case.
+                mis_brdf_pdf = eval_brdf_pdf(new_dir, n, v_dir, alpha, p_spec);
+
             } else {
                 // ── Lambertian diffuse ────────────────────────────────────────
                 //
@@ -912,6 +1151,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // reflection and not absorbed by the metal's free electrons.
                 let F_diff = fresnel_schlick(max(dot(n, new_dir), 0.0), f0);
                 throughput *= (1.0 - metallic) * albedo * (vec3(1.0) - F_diff) / (1.0 - p_spec);
+
+                // Store this bounce's BRDF PDF for use in the next miss case.
+                mis_brdf_pdf = eval_brdf_pdf(new_dir, n, v_dir, alpha, p_spec);
             }
 
             ray_orig = hit_pos + n * T_MIN;
@@ -921,37 +1163,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // ── Firefly suppression ───────────────────────────────────────────────────
     //
-    // IBL environment maps contain a sun whose linear radiance can be thousands
-    // of times brighter than the scene average. When a metallic or specular
-    // bounce accidentally points toward it, the sample radiance blows up. These
-    // outlier samples are called "fireflies" — scattered bright pixels that
-    // accumulate over time rather than averaging out, because each sample
-    // independently has a small chance of hitting the bright spot.
+    // MIS eliminates the main source of env-map fireflies by importance-sampling
+    // bright env pixels explicitly at each bounce. The clamp is raised to 10.0
+    // (was 3.0) now that MIS handles most of the variance — remaining outliers
+    // are typically glass caustics or very high-frequency emissive geometry where
+    // MIS doesn't apply. A higher threshold lets the tone-mapper show accurate
+    // peak specular highlights on metallic surfaces.
     //
-    // The correct fix is Multiple Importance Sampling (MIS) — weight env-map
-    // samples against the BRDF to give rare-but-bright directions their fair
-    // probability — but that is a sizeable feature. The standard stopgap is
-    // sample clamping: cap the per-sample luminance so no single sample can
-    // dominate the running average.
-    //
-    // The threshold must be chosen relative to the ACES tonemapper's saturation
-    // point, not some arbitrary linear value. ACES maps linear ≥ 10 to 1.0
-    // (saturated white), so a clamp at 20 still produces a full-white pixel on
-    // the first sample — the pixel only fades to normal after ~100 accumulated
-    // samples, which is nowhere near fast enough to prevent visible fireflies.
-    //
-    // A threshold of 3 means:
-    //   - sample 1 with a sun hit: 3 → ACES → 0.95 (bright, but not full white)
-    //   - sample 5 without further hit: 3/5 = 0.6 → ACES → 0.72 (normal looking)
-    // So fireflies converge in ~5 samples instead of ~100. The cost is that the
-    // absolute peak of a very smooth specular highlight gets biased slightly
-    // downward — but since ACES(3) = 0.95 and ACES(∞) = 1.0, both look like
-    // "bright shiny surface" on screen, and no one can tell the difference.
+    // At 10.0: ACES(10) ≈ 0.998 (essentially white) — correct for the peak of
+    // a mirror reflection. Outliers beyond 10 are genuine sampling accidents
+    // that still need suppression to avoid the classic firefly "stuck bright
+    // pixel" problem. The bias is now negligible for anything MIS handles.
     //
     // The clamp is applied to the luminance so the hue of bright samples is
     // preserved — we scale all channels equally rather than clamping per-channel.
     let sample_lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
-    let FIREFLY_CLAMP = 3.0;
+    let FIREFLY_CLAMP = 10.0;
     if sample_lum > FIREFLY_CLAMP {
         radiance *= FIREFLY_CLAMP / sample_lum;
     }

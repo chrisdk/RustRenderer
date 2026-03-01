@@ -21,16 +21,19 @@
 //!
 //! ## Buffer / binding layout
 //!
-//! | Group | Binding | Name         | Type    | Usage              |
-//! |-------|---------|--------------|---------|---------------------|
-//! | 0     | 0       | bvh_nodes    | storage | read               |
-//! | 0     | 1       | bvh_tris     | storage | read               |
-//! | 0     | 2       | materials    | storage | read               |
-//! | 0     | 3       | tex_data     | storage | read               |
-//! | 0     | 4       | tex_info     | storage | read               |
-//! | 1     | 0       | camera       | uniform | read               |
-//! | 1     | 1       | frame        | uniform | read               |
-//! | 1     | 2       | output       | storage | read_write         |
+//! | Group | Binding | Name                | Type    | Usage              |
+//! |-------|---------|---------------------|---------|---------------------|
+//! | 0     | 0       | bvh_nodes           | storage | read               |
+//! | 0     | 1       | bvh_tris            | storage | read               |
+//! | 0     | 2       | materials           | storage | read               |
+//! | 0     | 3       | tex_data            | storage | read               |
+//! | 0     | 4       | tex_info            | storage | read               |
+//! | 0     | 5       | env_pixels          | storage | read               |
+//! | 0     | 6       | env_marginal_cdf    | storage | read               |
+//! | 0     | 7       | env_conditional_cdf | storage | read               |
+//! | 1     | 0       | camera              | uniform | read               |
+//! | 1     | 1       | frame               | uniform | read               |
+//! | 1     | 2       | output              | storage | read_write         |
 
 use crate::accel::bvh::Bvh;
 use crate::camera::CameraUniform;
@@ -63,10 +66,18 @@ pub struct FrameUniforms {
     pub env_height:   u32,
     /// 1 = show the environment map (or procedural sky) as the scene background;
     /// 0 = use a neutral dark grey for rays that escape the scene.
-    /// When 0, the env map can still light the scene through secondary bounces
-    /// if IBL is also enabled — this toggle only affects the visible background.
+    /// When 0, the env map can still light the scene via env NEE (explicit IBL
+    /// shadow rays at each surface hit) — this toggle only affects what escaped
+    /// rays contribute to the background, not whether IBL lights the scene.
     pub env_background: u32,
-    pub _pad0:        u32,
+    /// Pre-computed constant for MIS PDF evaluation.
+    ///
+    /// `env_sample_weight = W * H / (total_sin_weighted_luminance * 2 * π²)`
+    ///
+    /// The PDF of a direction in solid-angle measure when importance-sampling
+    /// the equirectangular env map equals `luminance(pixel) * env_sample_weight`.
+    /// Set to 0.0 when no env map is loaded (disables MIS in the shader).
+    pub env_sample_weight: f32,
 }
 
 // ============================================================================
@@ -103,6 +114,18 @@ pub struct Renderer {
     /// Contains a 1×1 black pixel before any env map is loaded; replaced by
     /// `upload_environment`. Always valid so the bind group layout is fixed.
     env_pixels_buf: wgpu::Buffer,
+    /// Marginal CDF over rows of the sin-weighted luminance image.
+    /// `env_marginal_cdf[y]` = P(row ≤ y) — used for importance sampling.
+    /// Contains a 1-element dummy `[1.0]` when no env map is loaded.
+    env_marginal_cdf_buf: wgpu::Buffer,
+    /// Per-row conditional CDFs: `env_conditional_cdf[y*W + x]` = P(col ≤ x | row = y).
+    /// Used for the second stage of 2-D env map importance sampling.
+    /// Contains a 1-element dummy `[1.0]` when no env map is loaded.
+    env_conditional_cdf_buf: wgpu::Buffer,
+    /// Normalization constant for the MIS PDF: `W * H / (total_sin_weighted_lum * 2π²)`.
+    /// Set to 0.0 when no env map is loaded. Passed to the shader as
+    /// `FrameUniforms::env_sample_weight`; 0.0 disables env NEE in the shader.
+    env_sample_weight: f32,
     /// Dimensions of the loaded env map; (0, 0) when using the dummy.
     /// Passed to the shader in `FrameUniforms`; zero width triggers the
     /// procedural sky fallback.
@@ -185,27 +208,44 @@ impl Renderer {
             .await
             .map_err(|e| format!("GPU device creation failed: {e}"))?;
 
-        // A 1-pixel black env map dummy keeps the GPU binding slot valid
-        // before any real environment is loaded.
+        // Dummy GPU buffers keep all binding slots valid before any real environment
+        // is loaded. The CDF buffers need at least one element (WebGPU prohibits
+        // zero-size storage buffers). The single 1.0 value is a legal CDF: it
+        // represents "the only row/column is the last one", which is never reached
+        // because `env_sample_weight == 0.0` disables env importance sampling in
+        // the shader before the CDF buffers are ever indexed.
         use wgpu::util::DeviceExt;
         let env_pixels_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("env_pixels_dummy"),
-            contents: bytemuck::cast_slice(&[0.0f32; 4]),  // one vec4<f32>(0,0,0,1)
+            contents: bytemuck::cast_slice(&[0.0f32; 4]),  // one vec4<f32>(0,0,0,0)
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let env_marginal_cdf_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_marginal_cdf_dummy"),
+            contents: bytemuck::cast_slice(&[1.0f32]),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let env_conditional_cdf_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_conditional_cdf_dummy"),
+            contents: bytemuck::cast_slice(&[1.0f32]),
             usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         Ok(Self {
             device,
             queue,
-            bvh_nodes_buf:  None,
-            bvh_tris_buf:   None,
-            materials_buf:  None,
-            tex_data_buf:   None,
-            tex_info_buf:   None,
+            bvh_nodes_buf:           None,
+            bvh_tris_buf:            None,
+            materials_buf:           None,
+            tex_data_buf:            None,
+            tex_info_buf:            None,
             env_pixels_buf,
-            env_dims:       (0, 0),
-            ibl_enabled:    true,
-            env_background: true,
+            env_marginal_cdf_buf,
+            env_conditional_cdf_buf,
+            env_sample_weight:       0.0,
+            env_dims:                (0, 0),
+            ibl_enabled:             true,
+            env_background:          true,
             camera_buf:     None,
             frame_buf:      None,
             output_buf:     None,
@@ -344,27 +384,49 @@ impl Renderer {
     /// laid out as `[R, G, B, 1.0]` per pixel (vec4 with padding). See
     /// `scene::environment::decode_hdr` for the producer.
     ///
-    /// After this call the next `render_frame` will use the env map for the
-    /// background and ambient lighting. Can be called multiple times to swap
-    /// environments; the old buffer is dropped automatically.
+    /// Also builds the marginal + conditional CDFs used by the shader for
+    /// importance sampling and uploads them to their respective storage buffers.
+    /// Setting `env_sample_weight > 0` enables env NEE and MIS in the shader.
+    ///
+    /// Can be called multiple times to swap environments; old buffers are
+    /// dropped automatically.
     pub fn upload_environment(&mut self, width: u32, height: u32, pixels: Vec<f32>) {
         use wgpu::util::DeviceExt;
+
+        // Build importance-sampling CDFs on the CPU before uploading.
+        let (marginal_cdf, conditional_cdf, sample_weight) =
+            build_env_cdfs(&pixels, width as usize, height as usize);
+
         self.env_pixels_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("env_pixels"),
             contents: bytemuck::cast_slice(&pixels),
             usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
+        self.env_marginal_cdf_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_marginal_cdf"),
+            contents: bytemuck::cast_slice(&marginal_cdf),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.env_conditional_cdf_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_conditional_cdf"),
+            contents: bytemuck::cast_slice(&conditional_cdf),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.env_sample_weight = sample_weight;
         self.env_dims = (width, height);
-        log::info!("env map uploaded: {}×{} ({} MB)", width, height,
-            pixels.len() * 4 / 1_000_000);
+
+        log::info!(
+            "env map uploaded: {}×{} ({} MB), sample_weight={:.4}",
+            width, height, pixels.len() * 4 / 1_000_000, sample_weight,
+        );
     }
 
     /// Removes the loaded HDR environment map and reverts to the procedural
     /// sky gradient.
     ///
-    /// Replaces the env-pixels buffer with the 1-pixel black dummy that
-    /// `Renderer::new` installs on startup, and resets `env_dims` to `(0, 0)`.
-    /// The shader sees `env_width == 0` and falls through to `sky_color`.
+    /// Replaces all env buffers with single-element dummies and resets
+    /// `env_dims` to `(0, 0)`. Setting `env_sample_weight = 0.0` disables env
+    /// NEE in the shader so the dummy CDF buffers are never indexed.
     ///
     /// Calling this before a scene is loaded is safe and a no-op for rendering.
     pub fn unload_environment(&mut self) {
@@ -374,6 +436,17 @@ impl Renderer {
             contents: bytemuck::cast_slice(&[0.0f32; 4]),
             usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
+        self.env_marginal_cdf_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_marginal_cdf_dummy"),
+            contents: bytemuck::cast_slice(&[1.0f32]),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.env_conditional_cdf_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("env_conditional_cdf_dummy"),
+            contents: bytemuck::cast_slice(&[1.0f32]),
+            usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.env_sample_weight = 0.0;
         self.env_dims = (0, 0);
         log::info!("environment unloaded; reverting to procedural sky");
     }
@@ -382,6 +455,99 @@ impl Renderer {
     pub fn is_scene_loaded(&self) -> bool {
         self.bvh_nodes_buf.is_some()
     }
+}
+
+// ============================================================================
+// Environment importance sampling — CPU CDF build
+// ============================================================================
+
+/// Build 1-D CDFs for importance sampling an equirectangular HDR environment map.
+///
+/// Returns `(marginal_cdf, conditional_cdf, sample_weight)`:
+/// - `marginal_cdf[y]`         — CDF over rows: `P(row ≤ y)`.
+/// - `conditional_cdf[y*W+x]`  — CDF over columns within row y: `P(col ≤ x | row = y)`.
+/// - `sample_weight`           — normalisation constant `W·H / (total_energy · 2π²)`.
+///
+/// The PDF for sampling direction ω that maps to pixel `(x, y)` is:
+/// `pdf(ω) = luminance(x, y) × sample_weight`
+///
+/// Setting this equal to the BRDF PDF in the power heuristic gives unbiased
+/// MIS weights for the two-strategy estimator (env NEE + BRDF bounce).
+///
+/// ## Why sin(θ) weighting?
+///
+/// Equirectangular images give each pixel equal (u, v) area, but the solid angle
+/// subtended by a pixel shrinks near the poles as `sin(θ)`. Rows near the equator
+/// cover more sky and should be sampled proportionally more.  Multiplying each
+/// pixel's luminance by `sin(θ)` corrects for this — the resulting PDF is uniform
+/// over equal solid-angle patches rather than equal pixel-area patches.
+pub fn build_env_cdfs(pixels: &[f32], width: usize, height: usize) -> (Vec<f32>, Vec<f32>, f32) {
+    use std::f32::consts::PI;
+
+    // Compute sin-weighted luminance for every pixel.
+    // The pixel layout is vec4<f32>: R, G, B, A — so stride = 4.
+    let mut weighted_lum = vec![0.0f32; width * height];
+    for y in 0..height {
+        // Latitude of the pixel centre: θ = π·(y+0.5)/H maps y=0 → top, y=H-1 → bottom.
+        let theta     = PI * (y as f32 + 0.5) / height as f32;
+        let sin_theta = theta.sin();
+        for x in 0..width {
+            let i = (y * width + x) * 4;
+            if i + 2 < pixels.len() {
+                let lum = 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+                weighted_lum[y * width + x] = lum * sin_theta;
+            }
+        }
+    }
+
+    // Row energies: sum of weighted luminance in each row.
+    // Floor at 1e-10 so zero-energy rows (pitch-black bands) still produce a
+    // valid conditional CDF (avoids a 0/0 division).
+    let mut row_energy = vec![0.0f32; height];
+    for y in 0..height {
+        row_energy[y] = weighted_lum[y * width..(y + 1) * width]
+            .iter()
+            .sum::<f32>()
+            .max(1e-10);
+    }
+
+    let total_energy: f32 = row_energy.iter().sum::<f32>().max(1e-10);
+
+    // ── Marginal CDF over rows ───────────────────────────────────────────────
+    let mut marginal_cdf = vec![0.0f32; height];
+    let mut cumsum = 0.0f32;
+    for y in 0..height {
+        cumsum += row_energy[y] / total_energy;
+        marginal_cdf[y] = cumsum.min(1.0);
+    }
+
+    // ── Conditional CDFs over columns within each row ────────────────────────
+    let mut conditional_cdf = vec![0.0f32; width * height];
+    for y in 0..height {
+        let mut cumsum = 0.0f32;
+        for x in 0..width {
+            cumsum += weighted_lum[y * width + x] / row_energy[y];
+            conditional_cdf[y * width + x] = cumsum.min(1.0);
+        }
+    }
+
+    // ── Sample weight ────────────────────────────────────────────────────────
+    //
+    // The PDF of pixel (x, y) is:
+    //   pdf_pixel(x, y) = lum(x,y)·sin(θ_y) / total_energy
+    //
+    // The solid angle of one pixel is:
+    //   dω(x, y) = (2π/W)·(π/H)·sin(θ_y)
+    //
+    // Dividing gives the PDF in solid-angle measure:
+    //   pdf_ω = pdf_pixel / dω = lum(x,y)·W·H / (total_energy·2π²)
+    //
+    // Everything except `lum(x,y)` is constant across the image — that's the
+    // sample_weight.  The shader evaluates the env-map PDF for any direction
+    // as `luminance(env_sample(dir)) * frame.env_sample_weight`.
+    let sample_weight = (width * height) as f32 / (total_energy * 2.0 * PI * PI);
+
+    (marginal_cdf, conditional_cdf, sample_weight)
 }
 
 // ============================================================================
@@ -399,7 +565,7 @@ impl Renderer {
         });
 
         // ── Bind group layouts ───────────────────────────────────────────────
-        // Group 0: scene data — six read-only storage buffers.
+        // Group 0: scene data — eight read-only storage buffers.
         let scene_bgl = self.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
                 label: Some("scene_bgl"),
@@ -407,9 +573,11 @@ impl Renderer {
                     storage_ro(0), // bvh_nodes
                     storage_ro(1), // bvh_tris
                     storage_ro(2), // materials
-                    storage_ro(3), // tex_data     (flat RGBA8 pixel data)
-                    storage_ro(4), // tex_info     (per-texture offset/size)
-                    storage_ro(5), // env_pixels   (HDR env map as vec4<f32>)
+                    storage_ro(3), // tex_data           (flat RGBA8 pixel data)
+                    storage_ro(4), // tex_info           (per-texture offset/size)
+                    storage_ro(5), // env_pixels         (HDR env map as vec4<f32>)
+                    storage_ro(6), // env_marginal_cdf   (row importance weights)
+                    storage_ro(7), // env_conditional_cdf (per-row column weights)
                 ],
             }
         );
@@ -546,10 +714,11 @@ impl Renderer {
                   | if !self.ibl_enabled { 2u32 } else { 0u32 };
         let frame_data = FrameUniforms {
             width, height, sample_index, flags,
-            env_width:      self.env_dims.0,
-            env_height:     self.env_dims.1,
-            env_background: u32::from(self.env_background),
-            _pad0: 0,
+            env_width:         self.env_dims.0,
+            env_height:        self.env_dims.1,
+            env_background:    u32::from(self.env_background),
+            // Zero when no env is loaded — disables env NEE + MIS in the shader.
+            env_sample_weight: self.env_sample_weight,
         };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
@@ -576,6 +745,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: self.tex_data_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: self.tex_info_buf.as_ref().expect("upload_scene not called").as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: self.env_pixels_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.env_marginal_cdf_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: self.env_conditional_cdf_buf.as_entire_binding() },
             ],
         });
 
@@ -693,15 +864,118 @@ mod tests {
     fn test_frame_uniforms_gpu_layout() {
         assert_eq!(size_of::<FrameUniforms>(), 32,
             "FrameUniforms must be 32 bytes (two 16-byte vec4 rows in WGSL)");
-        assert_eq!(offset_of!(FrameUniforms, width),          0);
-        assert_eq!(offset_of!(FrameUniforms, height),         4);
-        assert_eq!(offset_of!(FrameUniforms, sample_index),   8);
-        assert_eq!(offset_of!(FrameUniforms, flags),          12);
-        assert_eq!(offset_of!(FrameUniforms, env_width),      16);
-        assert_eq!(offset_of!(FrameUniforms, env_height),     20);
-        assert_eq!(offset_of!(FrameUniforms, env_background), 24);
-        // Padding field exists; just verify Pod is satisfied.
+        assert_eq!(offset_of!(FrameUniforms, width),             0);
+        assert_eq!(offset_of!(FrameUniforms, height),            4);
+        assert_eq!(offset_of!(FrameUniforms, sample_index),      8);
+        assert_eq!(offset_of!(FrameUniforms, flags),             12);
+        assert_eq!(offset_of!(FrameUniforms, env_width),         16);
+        assert_eq!(offset_of!(FrameUniforms, env_height),        20);
+        assert_eq!(offset_of!(FrameUniforms, env_background),    24);
+        assert_eq!(offset_of!(FrameUniforms, env_sample_weight), 28);
+        // Verify Pod is satisfied (bytemuck requires no padding bytes and no
+        // invalid bit patterns — both f32 and u32 are Pod, so this is fine).
         let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());
+    }
+
+    /// A uniform-luminance env map has equal pixel weights within each row, so
+    /// every row's conditional CDF should be exactly uniform: CDF[x] = (x+1)/W.
+    ///
+    /// The marginal CDF over rows is NOT uniform even for uniform luminance,
+    /// because the equirectangular sin(θ) correction gives equatorial rows more
+    /// weight than polar rows (they subtend more solid angle).  We verify the
+    /// marginal CDF is consistent with the expected per-row sin(θ) weights.
+    #[test]
+    fn test_build_env_cdfs_uniform() {
+        use std::f32::consts::PI;
+        let w = 4usize; let h = 4usize;
+        // Four f32s per pixel (vec4); luminance = 0.2126+0.7152+0.0722 = 1.0.
+        let pixels = vec![1.0f32; w * h * 4];
+        let (marginal, cond, _weight) = build_env_cdfs(&pixels, w, h);
+
+        // ── Marginal CDF: verify against analytically computed sin-weighted totals ──
+        // Row energy ∝ sin(θ_y) for uniform luminance.
+        let sins: Vec<f32> = (0..h).map(|y| {
+            let theta = PI * (y as f32 + 0.5) / h as f32;
+            theta.sin()
+        }).collect();
+        let total: f32 = sins.iter().sum();
+        let mut expected_marginal = Vec::new();
+        let mut cumsum = 0.0f32;
+        for &s in &sins { cumsum += s / total; expected_marginal.push(cumsum.min(1.0)); }
+
+        assert_eq!(marginal.len(), h);
+        for (y, (&got, &exp)) in marginal.iter().zip(expected_marginal.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-5,
+                "marginal_cdf[{y}]: got {got:.6}, expected {exp:.6}");
+        }
+
+        // ── Conditional CDFs: uniform within each row ─────────────────────────
+        assert_eq!(cond.len(), w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let expected = (x + 1) as f32 / w as f32;
+                let got = cond[y * w + x];
+                assert!((got - expected).abs() < 1e-5,
+                    "cond_cdf[{y},{x}]: got {got:.6}, expected {expected:.6}");
+            }
+        }
+    }
+
+    /// A single bright pixel should push all CDF mass to its row and column.
+    #[test]
+    fn test_build_env_cdfs_single_bright_pixel() {
+        let w = 4usize; let h = 4usize;
+        let mut pixels = vec![0.0f32; w * h * 4];
+        // Set pixel (col=2, row=1) to white: luminance = 1.0.
+        let bright_row = 1usize; let bright_col = 2usize;
+        let i = (bright_row * w + bright_col) * 4;
+        pixels[i]     = 1.0; // R
+        pixels[i + 1] = 1.0; // G
+        pixels[i + 2] = 1.0; // B
+
+        let (marginal, cond, sample_weight) = build_env_cdfs(&pixels, w, h);
+
+        // Marginal CDF: all mass in row 1, so CDF is 0 for rows 0, then jumps to 1.
+        assert!(marginal[0] < 1e-5, "row 0 should have near-zero mass");
+        assert!((marginal[bright_row] - 1.0).abs() < 1e-5,
+            "all mass should be at row {bright_row}");
+
+        // Conditional CDF for bright_row: mass is entirely in bright_col.
+        for x in 0..bright_col {
+            assert!(cond[bright_row * w + x] < 1e-5,
+                "cond_cdf[{bright_row},{x}] should be near zero before bright_col");
+        }
+        assert!((cond[bright_row * w + bright_col] - 1.0).abs() < 1e-5);
+
+        // sample_weight must be positive.
+        assert!(sample_weight > 0.0, "sample_weight should be positive");
+    }
+
+    /// CDFs must be non-decreasing and end exactly at 1.0.
+    #[test]
+    fn test_build_env_cdfs_monotone() {
+        let w = 8usize; let h = 4usize;
+        // Random-ish luminance pattern.
+        let mut pixels = vec![0.0f32; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x + y * 3) % 5) as f32 / 5.0;
+                let i = (y * w + x) * 4;
+                pixels[i] = v; pixels[i + 1] = v; pixels[i + 2] = v;
+            }
+        }
+
+        let (marginal, cond, _) = build_env_cdfs(&pixels, w, h);
+
+        // Check marginal is non-decreasing and ends at 1.
+        for y in 1..h { assert!(marginal[y] >= marginal[y - 1]); }
+        assert!((marginal[h - 1] - 1.0).abs() < 1e-5);
+
+        // Check each row's conditional CDF.
+        for y in 0..h {
+            for x in 1..w { assert!(cond[y * w + x] >= cond[y * w + x - 1]); }
+            assert!((cond[y * w + w - 1] - 1.0).abs() < 1e-5);
+        }
     }
 
     // GpuTexInfo layout is tested once, authoritatively, in renderer::tests.
