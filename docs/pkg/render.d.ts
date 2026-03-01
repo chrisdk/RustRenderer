@@ -21,6 +21,17 @@ export function get_pixels(width: number, height: number): Promise<Uint8Array>;
 export function get_scene_bounds(): Float32Array;
 
 /**
+ * Returns a snapshot of the most recently loaded scene's statistics as a
+ * `Uint32Array` of five values:
+ * `[triangle_count, vertex_count, mesh_count, texture_count, file_size_kb]`.
+ *
+ * The file size is in whole kilobytes; divide by 1024 in JS to get MB.
+ * Returns all-zeros if no scene has been loaded yet — the frontend shows
+ * `—` for each field until a real scene arrives.
+ */
+export function get_scene_stats(): Uint32Array;
+
+/**
  * Initialises the renderer: sets up logging, selects a GPU adapter, and opens
  * a WebGPU device.
  *
@@ -251,6 +262,7 @@ export interface InitOutput {
     readonly update_camera: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly get_scene_bounds: () => any;
     readonly unload_environment: () => void;
+    readonly get_scene_stats: () => any;
     readonly wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7: (a: number, b: number) => void;
     readonly wasm_bindgen__closure__destroy__he5ef96efaea0f49b: (a: number, b: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h6b539ed7f51515d5: (a: number, b: number, c: any) => [number, number];

@@ -19,6 +19,7 @@ export const set_sun_intensity: (a: number) => void;
 export const update_camera: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const get_scene_bounds: () => any;
 export const unload_environment: () => void;
+export const get_scene_stats: () => any;
 export const wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7: (a: number, b: number) => void;
 export const wasm_bindgen__closure__destroy__he5ef96efaea0f49b: (a: number, b: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h6b539ed7f51515d5: (a: number, b: number, c: any) => [number, number];

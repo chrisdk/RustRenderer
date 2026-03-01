@@ -8,7 +8,7 @@
  *   4. Preview: update_camera → raster_frame → raster_get_pixels (60 fps rasterizer).
  *   5. HQ render: update_camera → render → get_pixels → putImageData (path tracer).
  */
-import init, { init_renderer, load_scene, load_environment, unload_environment, set_ibl_enabled, set_env_background, set_max_bounces, set_sun_azimuth, set_sun_elevation, set_sun_intensity, set_ibl_scale, set_exposure, update_camera, render, get_pixels, raster_frame, raster_get_pixels, get_scene_bounds, } from '../pkg/render.js';
+import init, { init_renderer, load_scene, load_environment, unload_environment, set_ibl_enabled, set_env_background, set_max_bounces, set_sun_azimuth, set_sun_elevation, set_sun_intensity, set_ibl_scale, set_exposure, update_camera, render, get_pixels, raster_frame, raster_get_pixels, get_scene_bounds, get_scene_stats, } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
 import { Turntable } from './turntable.js';
 import { RenderController } from './render-controller.js';
@@ -29,6 +29,13 @@ const saveBtn = document.getElementById('save-btn');
 const resetCamBtn = document.getElementById('reset-cam-btn');
 const kbdHelpBtn = document.getElementById('kbd-help-btn');
 const kbdOverlay = document.getElementById('kbd-overlay');
+const infoBtn = document.getElementById('info-btn');
+const infoOverlay = document.getElementById('info-overlay');
+const infoTriangles = document.getElementById('info-triangles');
+const infoVertices = document.getElementById('info-vertices');
+const infoMeshes = document.getElementById('info-meshes');
+const infoTextures = document.getElementById('info-textures');
+const infoFilesize = document.getElementById('info-filesize');
 const sceneSelect = document.getElementById('scene-select');
 const sceneAttrib = document.getElementById('scene-attribution');
 const envSelect = document.getElementById('env-select');
@@ -89,6 +96,15 @@ const ctrl = new RenderController({
         saveBtn.disabled = false;
         resetCamBtn.disabled = false;
         fadeHints();
+        // Populate the scene info overlay with fresh stats.
+        // stats = [triangle_count, vertex_count, mesh_count, texture_count, file_size_kb]
+        const stats = get_scene_stats();
+        infoTriangles.textContent = stats[0].toLocaleString();
+        infoVertices.textContent = stats[1].toLocaleString();
+        infoMeshes.textContent = stats[2].toLocaleString();
+        infoTextures.textContent = stats[3].toLocaleString();
+        const mb = stats[4] / 1024;
+        infoFilesize.textContent = mb >= 1 ? `${mb.toFixed(1)} MB` : `${stats[4]} KB`;
     },
     lockCamera: (w, h) => {
         // Lock the viewpoint for the full HQ render. Does NOT set cameraDirty
@@ -604,22 +620,28 @@ window.addEventListener('keydown', e => {
             ctrl.cancelHighQualityRender();
             applyTurntable();
             break;
+        case 'i':
+        case 'I':
+            infoOverlay.hidden = !infoOverlay.hidden;
+            break;
         case '?':
             kbdOverlay.hidden = !kbdOverlay.hidden;
             break;
     }
 });
 // ─────────────────────────────────────────────────────────────────────────────
-// Keyboard help overlay
+// Overlay toggle buttons (info + keyboard shortcuts)
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Both overlays are sticky: they only open/close via their button or keyboard
+// shortcut.  Camera interaction (drag, zoom) no longer dismisses them — the
+// old auto-dismiss pointerdown listener has been removed intentionally.
+infoBtn.addEventListener('click', () => {
+    infoOverlay.hidden = !infoOverlay.hidden;
+});
 kbdHelpBtn.addEventListener('click', () => {
     kbdOverlay.hidden = !kbdOverlay.hidden;
 });
-// Clicking anywhere on the canvas dismisses the overlay so it doesn't block
-// the view when the user starts interacting.
-canvas.addEventListener('pointerdown', () => {
-    kbdOverlay.hidden = true;
-}, { capture: true });
 // ─────────────────────────────────────────────────────────────────────────────
 // UI helpers
 // ─────────────────────────────────────────────────────────────────────────────

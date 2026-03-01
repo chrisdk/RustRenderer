@@ -322,12 +322,21 @@
         .secondary-btn:hover    { background: rgba(255,255,255,0.09); color: rgba(255,255,255,0.75); }
         .secondary-btn:disabled { opacity: 0.30; cursor: default; }
 
-        /* ── Keyboard help button (floating ? in canvas corner) ─────────────── */
+        /* ── Info + keyboard-shortcut toggle buttons (floating, bottom-right) ── */
 
-        #kbd-help-btn {
+        #overlay-btns {
             position: absolute;
             bottom: 14px;
             right: 14px;
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            z-index: 10;
+        }
+
+        /* Both buttons share the same pill style. */
+        #info-btn,
+        #kbd-help-btn {
             width: 26px;
             height: 26px;
             border-radius: 50%;
@@ -340,26 +349,38 @@
             line-height: 1;
             backdrop-filter: blur(4px);
             transition: background 0.12s, color 0.12s;
-            z-index: 10;
         }
+        #info-btn:hover,
         #kbd-help-btn:hover { background: rgba(0,0,0,0.75); color: rgba(255,255,255,0.85); }
 
-        /* ── Keyboard shortcut overlay ───────────────────────────────────────── */
+        /* ── Overlay panel stack — grows upward from the button row ──────────── */
 
-        #kbd-overlay {
+        #overlay-stack {
             position: absolute;
             bottom: 48px;
             right: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: flex-end;
+            z-index: 10;
+        }
+
+        /* Both panels share the same glass-pane look. */
+        #info-overlay,
+        #kbd-overlay {
             background: rgba(10,10,10,0.85);
             border: 1px solid rgba(255,255,255,0.12);
             border-radius: 8px;
             padding: 10px 14px;
             backdrop-filter: blur(8px);
-            z-index: 10;
             min-width: 220px;
         }
+        #info-overlay[hidden],
         #kbd-overlay[hidden] { display: none; }
-        .kbd-title {
+
+        /* Shared title style for both panels. */
+        .overlay-title {
             font-size: 10px;
             font-weight: 700;
             letter-spacing: 0.10em;
@@ -367,14 +388,22 @@
             color: rgba(255,255,255,0.28);
             margin-bottom: 7px;
         }
-        .kbd-row {
+
+        /* Shared row style.  Space-between works for both the label+value pairs
+           in the info panel and the kbd+description pairs in the shortcuts panel. */
+        .overlay-row {
             display: flex;
             align-items: center;
-            gap: 10px;
+            justify-content: space-between;
+            gap: 16px;
             padding: 3px 0;
             font-size: 12px;
             color: rgba(255,255,255,0.65);
         }
+
+        /* Dim the label half of each info row slightly. */
+        .overlay-label { opacity: 0.7; }
+
         kbd {
             display: inline-block;
             background: rgba(255,255,255,0.10);
@@ -591,15 +620,34 @@
 
         <div id="drop-overlay">Drop GLTF / GLB or HDR here</div>
 
-        <!-- Floating keyboard-shortcut help -->
-        <button id="kbd-help-btn" title="Keyboard shortcuts">?</button>
-        <div id="kbd-overlay" hidden>
-            <div class="kbd-title">Keyboard shortcuts</div>
-            <div class="kbd-row"><kbd>R</kbd><span>Start / cancel render</span></div>
-            <div class="kbd-row"><kbd>Esc</kbd><span>Cancel render</span></div>
-            <div class="kbd-row"><kbd>F</kbd><span>Auto-frame camera</span></div>
-            <div class="kbd-row"><kbd>+</kbd><span>Zoom in</span></div>
-            <div class="kbd-row"><kbd>−</kbd><span>Zoom out</span></div>
+        <!-- Overlay panels: info above, keyboard shortcuts below.
+             Both are sticky — only their toggle buttons open/close them.
+             The stack grows upward from the button row below it. -->
+        <div id="overlay-stack">
+            <div id="info-overlay" hidden>
+                <div class="overlay-title">Scene info</div>
+                <div class="overlay-row"><span class="overlay-label">Triangles</span><span id="info-triangles">—</span></div>
+                <div class="overlay-row"><span class="overlay-label">Vertices</span><span id="info-vertices">—</span></div>
+                <div class="overlay-row"><span class="overlay-label">Meshes</span><span id="info-meshes">—</span></div>
+                <div class="overlay-row"><span class="overlay-label">Textures</span><span id="info-textures">—</span></div>
+                <div class="overlay-row"><span class="overlay-label">File size</span><span id="info-filesize">—</span></div>
+            </div>
+            <div id="kbd-overlay" hidden>
+                <div class="overlay-title">Keyboard shortcuts</div>
+                <div class="overlay-row"><kbd>R</kbd><span>Start / cancel render</span></div>
+                <div class="overlay-row"><kbd>Esc</kbd><span>Cancel render</span></div>
+                <div class="overlay-row"><kbd>F</kbd><span>Auto-frame camera</span></div>
+                <div class="overlay-row"><kbd>+</kbd><span>Zoom in</span></div>
+                <div class="overlay-row"><kbd>−</kbd><span>Zoom out</span></div>
+                <div class="overlay-row"><kbd>I</kbd><span>Toggle scene info</span></div>
+                <div class="overlay-row"><kbd>?</kbd><span>Toggle shortcuts</span></div>
+            </div>
+        </div>
+
+        <!-- Toggle buttons: info (left) and keyboard shortcuts (right). -->
+        <div id="overlay-btns">
+            <button id="info-btn" title="Scene info">i</button>
+            <button id="kbd-help-btn" title="Keyboard shortcuts">?</button>
         </div>
     </div>
 

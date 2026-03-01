@@ -50,6 +50,10 @@ struct AppState {
     /// Set by `load_scene`; used by `get_scene_bounds` so the frontend can
     /// auto-position the camera without needing a separate bounding-box pass.
     scene_bounds: Option<([f32; 3], [f32; 3])>,
+    /// Quick stats captured at scene-load time for the UI info overlay.
+    /// Layout: `[triangle_count, vertex_count, mesh_count, texture_count, file_size_kb]`.
+    /// `None` until the first `load_scene` call; replaced on every subsequent load.
+    scene_stats: Option<[u32; 5]>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -100,6 +104,7 @@ pub async fn init_renderer() -> Result<(), JsValue> {
         raster,
         camera,
         scene_bounds: None,
+        scene_stats:  None,
     }));
 
     log::info!("renderer ready");
@@ -122,6 +127,10 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
 
     let bvh = Bvh::build(&scene);
 
+    // Capture file size here, before `bytes` is no longer in scope relative
+    // to the closure below (the closure moves `scene` and `bvh`).
+    let file_kb = (bytes.len() / 1024) as u32;
+
     STATE.with(|s| {
         let mut guard = s.borrow_mut();
         let state = guard
@@ -141,6 +150,16 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
         // both pipelines share the same underlying GPU device.
         let (device, _queue) = state.renderer.device_queue();
         state.raster.upload_scene(device, &scene);
+
+        // Snapshot scene statistics for the UI info overlay.  We read from
+        // `scene` after both upload calls (which only borrow it) so all fields
+        // are still accessible.  `file_kb` was captured from `bytes.len()`
+        // before entering this closure.
+        let tri_count  = (scene.indices.len()  / 3) as u32;
+        let vert_count = scene.vertices.len()       as u32;
+        let mesh_count = scene.meshes.len()         as u32;
+        let tex_count  = scene.textures.len()       as u32;
+        state.scene_stats = Some([tri_count, vert_count, mesh_count, tex_count, file_kb]);
 
         state.scene_bounds = bounds;
         log::info!("scene loaded");
@@ -383,6 +402,26 @@ pub fn get_scene_bounds() -> js_sys::Float32Array {
                 arr
             })
             .unwrap_or_else(|| js_sys::Float32Array::new_with_length(0))
+    })
+}
+
+/// Returns a snapshot of the most recently loaded scene's statistics as a
+/// `Uint32Array` of five values:
+/// `[triangle_count, vertex_count, mesh_count, texture_count, file_size_kb]`.
+///
+/// The file size is in whole kilobytes; divide by 1024 in JS to get MB.
+/// Returns all-zeros if no scene has been loaded yet — the frontend shows
+/// `—` for each field until a real scene arrives.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn get_scene_stats() -> js_sys::Uint32Array {
+    STATE.with(|s| {
+        let guard = s.borrow();
+        let stats = guard
+            .as_ref()
+            .and_then(|st| st.scene_stats)
+            .unwrap_or([0; 5]);
+        js_sys::Uint32Array::from(stats.as_slice())
     })
 }
 

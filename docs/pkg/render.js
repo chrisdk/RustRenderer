@@ -30,6 +30,21 @@ export function get_scene_bounds() {
 }
 
 /**
+ * Returns a snapshot of the most recently loaded scene's statistics as a
+ * `Uint32Array` of five values:
+ * `[triangle_count, vertex_count, mesh_count, texture_count, file_size_kb]`.
+ *
+ * The file size is in whole kilobytes; divide by 1024 in JS to get MB.
+ * Returns all-zeros if no scene has been loaded yet — the frontend shows
+ * `—` for each field until a real scene arrives.
+ * @returns {Uint32Array}
+ */
+export function get_scene_stats() {
+    const ret = wasm.get_scene_stats();
+    return ret;
+}
+
+/**
  * Initialises the renderer: sets up logging, selects a GPU adapter, and opens
  * a WebGPU device.
  *
@@ -503,6 +518,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_ed69e637b553a997: function() {
             const ret = new Object();
+            return ret;
+        },
+        __wbg_new_from_slice_98ba05e7059309c1: function(arg0, arg1) {
+            const ret = new Uint32Array(getArrayU32FromWasm0(arg0, arg1));
             return ret;
         },
         __wbg_new_from_slice_d7e202fdbee3c396: function(arg0, arg1) {
