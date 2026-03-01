@@ -12,10 +12,13 @@
 //! ## High-level flow
 //!
 //! 1. `init_renderer()` — set up logging, select a GPU adapter, open a device.
-//! 2. `load_scene(bytes)` — parse GLTF, build the BVH, upload to the GPU.
-//! 3. `update_camera(...)` — update the camera uniform and upload it.
-//! 4. `render()` — dispatch the path-trace compute shader (high quality).
-//! 5. `raster_frame()` — draw the rasterising preview (fast, interactive).
+//! 2. `load_scene(bytes)` — parse GLTF, build the BVH, upload to both renderers.
+//! 3. `load_environment(bytes)` — decode an HDRI `.hdr` file and upload to the GPU.
+//! 4. `update_camera(...)` — update the camera uniform and upload it.
+//! 5. `render()` — dispatch the path-trace compute shader (high quality).
+//! 6. `raster_frame()` — draw the rasterising preview (fast, interactive).
+//! 7. Per-control setters (`set_sun_azimuth`, `set_exposure`, `set_ibl_scale`, …)
+//!    — update lighting parameters; both renderers pick them up on the next frame.
 
 // On wasm32 the prelude brings #[wasm_bindgen] and JsValue into scope.
 // On native this line is compiled away entirely.
@@ -174,17 +177,18 @@ pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
 /// Controls whether the loaded environment map (or procedural sky) is rendered
 /// as the visible background.
 ///
-/// When `visible` is `true` (the default), rays that escape the scene sample
-/// the environment / sky as normal. When `false`, escaped rays contribute a
-/// neutral dark grey instead — giving a "studio lighting" look where the env
-/// map still illuminates the scene but is not visible as the background.
+/// When `visible` is `true` (the default), the sky/env map is drawn behind all
+/// geometry. In path-traced output, rays that escape the scene contribute the
+/// full env/sky radiance. In the rasteriser preview, a fullscreen sky pass
+/// renders the env map or procedural gradient before geometry is drawn.
 ///
-/// Affects path-traced output only. The rasteriser does not render background
-/// sky pixels (they use the fixed clear colour); use `set_ibl_enabled` to
-/// toggle whether the env map is used for ambient shading in the preview.
+/// When `false`, the background shows a neutral dark grey instead — a "studio
+/// lighting" look where the env map still illuminates the scene (via IBL) but
+/// is not visible as the backdrop. Both renderers respect this flag.
 ///
-/// Changes take effect on the next `render()` call. To avoid blending old and
-/// new samples, start a fresh render by passing `sample_index = 0`.
+/// Path-tracer changes take effect on the next `render()` call; start a fresh
+/// render (`sample_index = 0`) to avoid blending old and new samples.
+/// Rasteriser changes take effect on the next `raster_frame()` call.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn set_env_background(visible: bool) {

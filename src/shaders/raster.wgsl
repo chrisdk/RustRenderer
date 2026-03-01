@@ -9,13 +9,18 @@
 // clicks Render.
 //
 // Algorithm: single-pass PBR approximation.
-//   – All four texture maps applied: albedo, normal, metallic/roughness, emissive.
+//   – All five texture maps applied: albedo (sRGB), normal, metallic/roughness,
+//     emissive, and ambient occlusion — bilinear filtered.
 //   – TBN normal mapping via stored vertex tangents (GLTF convention: tangent.w
 //     gives handedness; bitangent = cross(N, T) * w).
-//   – One directional "sun" light + sky-gradient ambient for convincing shading.
+//   – Directional sun (azimuth/elevation/intensity from per-frame uniform) +
+//     diffuse IBL ambient + specular IBL (split-sum, Karis 2013) — HDR env map
+//     when loaded, procedural sky gradient as fallback.
+//   – Sky background pass (fullscreen triangle, depth_compare = Always) renders
+//     the env map or procedural gradient behind all geometry.
 //   – GGX NDF specular + Schlick Fresnel (no G2/V term — fast and close enough).
-//   – No shadows, no reflections, no refraction — those are the path tracer's job.
-//   – Reinhard tonemap + gamma so colours look reasonable.
+//   – No hard shadows, no refraction — the path tracer handles those.
+//   – ACES filmic tonemap + sRGB gamma; all UI controls live-update the preview.
 //
 // The Material struct here must byte-for-byte match src/scene/material.rs.
 // The TexInfo struct must match GpuTexInfo in src/renderer/raster.rs.

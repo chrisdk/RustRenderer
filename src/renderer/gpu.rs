@@ -756,8 +756,7 @@ impl Renderer {
         // Upload frame uniforms.
         // Bit 0: preview mode (cap bounces for interactive speed).
         // Bit 1: IBL disabled (use procedural sky even if an env map is loaded).
-        let flags = if preview          { 1u32 } else { 0u32 }
-                  | if !self.ibl_enabled { 2u32 } else { 0u32 };
+        let flags = u32::from(preview) | (u32::from(!self.ibl_enabled) << 1);
         let frame_data = FrameUniforms {
             width, height, sample_index, flags,
             env_width:         self.env_dims.0,
