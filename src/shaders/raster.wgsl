@@ -73,44 +73,152 @@ struct TexInfo {
     _pad:   u32,
 }
 
-@group(0) @binding(0) var<uniform>       camera:    RasterCamera;
-@group(0) @binding(1) var<storage, read> instances: array<InstanceData>;
-@group(0) @binding(2) var<storage, read> materials: array<Material>;
+/// Per-frame lighting controls passed from Rust. Mirrors `RasterFrameUniforms`
+/// in raster.rs — field offsets must match exactly.
+///
+/// Note: no explicit `_pad` field here even though the Rust struct has one.
+/// WGSL automatically pads a struct to a multiple of its alignment. With
+/// `env_background` (the last field) ending at byte 40 and AlignOf = 16,
+/// the shader sees this struct as `roundUp(40, 16) = 48` bytes — matching
+/// the Rust side. `array<u32, N>` would be illegal in `var<uniform>` because
+/// WGSL requires array element alignment ≥ 16; plain u32 fields are safe.
+struct RasterFrame {
+    sun_dir:        vec3<f32>,  // normalised world-space direction toward the sun (offset 0)
+    sun_intensity:  f32,        // radiance multiplier; 0 = off, 1 = default        (offset 12)
+    exposure:       f32,        // EV stops; applied as linear × 2^exposure          (offset 16)
+    ibl_scale:      f32,        // multiplier for all sky/env contributions           (offset 20)
+    env_available:  u32,        // 1 = HDR env map loaded and IBL enabled            (offset 24)
+    env_width:      u32,        // env map pixel width                               (offset 28)
+    env_height:     u32,        // env map pixel height                              (offset 32)
+    env_background: u32,        // 1 = draw env/sky as background (sky pass)         (offset 36)
+    // struct ends at 40; AlignOf = 16 → SizeOf = roundUp(40, 16) = 48 bytes.
+}
+
+@group(0) @binding(0) var<uniform>       camera:     RasterCamera;
+@group(0) @binding(1) var<storage, read> instances:  array<InstanceData>;
+@group(0) @binding(2) var<storage, read> materials:  array<Material>;
 /// Flat RGBA8 pixel data for all textures. One u32 per pixel: R in low byte,
 /// A in high byte. Same packing as the path tracer's tex_data buffer.
-@group(0) @binding(3) var<storage, read> tex_data:  array<u32>;
+@group(0) @binding(3) var<storage, read> tex_data:   array<u32>;
 /// Per-texture metadata (pixel offset + dimensions). Indexed by material texture index.
-@group(0) @binding(4) var<storage, read> tex_info:  array<TexInfo>;
+@group(0) @binding(4) var<storage, read> tex_info:   array<TexInfo>;
+/// Per-frame lighting controls (sun, exposure, IBL scale, env dimensions).
+@group(0) @binding(5) var<uniform>       frame:      RasterFrame;
+/// HDR environment map pixels as `vec4<f32>` (linear RGB, A unused).
+/// Shared directly with the path tracer — no duplication. Always bound;
+/// `frame.env_available` controls whether the shader actually samples it.
+@group(0) @binding(6) var<storage, read> env_pixels: array<vec4<f32>>;
 
 
 // =============================================================================
 // Texture sampling
 // =============================================================================
 
-/// Samples a packed RGBA8 texture from the flat storage buffer.
+/// Unpacks a packed RGBA8 texel (one u32, R in low byte) into a linear vec4.
 ///
-/// Matches `sample_texture()` in trace.wgsl. Returns (1,1,1,1) for invalid or
-/// absent textures (idx < 0), so multiplying by the result is always safe.
-///
-/// UV coordinates are wrapped with fract() so values outside [0,1] tile
-/// rather than clamp — standard GLTF REPEAT wrap mode.
-fn sample_tex(idx: i32, uv: vec2<f32>) -> vec4<f32> {
-    if (idx < 0) { return vec4<f32>(1.0); }
-    let info = tex_info[u32(idx)];
-    if (info.width == 0u || info.height == 0u) { return vec4<f32>(1.0); }
-
-    let uf  = fract(uv.x);
-    let vf  = fract(uv.y);
-    let px  = min(u32(uf * f32(info.width)),  info.width  - 1u);
-    let py  = min(u32(vf * f32(info.height)), info.height - 1u);
-    let raw = tex_data[info.offset + py * info.width + px];
-
+/// Mirrors `unpack_texel()` in trace.wgsl — both sides of the preview/render
+/// split must decode pixels identically or colours will differ between modes.
+fn unpack_rgba8(raw: u32) -> vec4<f32> {
     return vec4<f32>(
         f32( raw        & 0xFFu) / 255.0,
         f32((raw >>  8u) & 0xFFu) / 255.0,
         f32((raw >> 16u) & 0xFFu) / 255.0,
         f32((raw >> 24u) & 0xFFu) / 255.0,
     );
+}
+
+/// Samples a packed RGBA8 texture from the flat storage buffer using
+/// **bilinear filtering** (4-tap blend), matching `sample_texture()` in
+/// trace.wgsl.
+///
+/// Returns (1,1,1,1) for invalid or absent textures (idx < 0), so multiplying
+/// by the result is always safe.
+///
+/// UV coordinates wrap with fract() (standard GLTF REPEAT mode). The -0.5 texel
+/// offset aligns the sample point with texel *centres* rather than texel
+/// *corners* — the same convention used by hardware sampler units and by the
+/// path tracer, so both modes filter identically on the same texture data.
+///
+/// Bilinear filtering is especially important for normal maps: nearest-neighbour
+/// on a low-resolution normal map produces visible faceting on curved surfaces
+/// that vanishes after switching to the path tracer.
+fn sample_tex(idx: i32, uv: vec2<f32>) -> vec4<f32> {
+    if (idx < 0) { return vec4<f32>(1.0); }
+    let info = tex_info[u32(idx)];
+    let W = info.width;
+    let H = info.height;
+    if (W == 0u || H == 0u) { return vec4<f32>(1.0); }
+
+    // Map UV to texel space with -0.5 offset for texel-centre alignment.
+    let u = fract(uv.x) * f32(W) - 0.5;
+    let v = fract(uv.y) * f32(H) - 0.5;
+
+    let x0i = i32(floor(u));
+    let y0i = i32(floor(v));
+
+    // Clamp to valid range (GLTF CLAMP_TO_EDGE within each texel neighbourhood).
+    let x0 = u32(clamp(x0i,     0, i32(W) - 1));
+    let y0 = u32(clamp(y0i,     0, i32(H) - 1));
+    let x1 = u32(clamp(x0i + 1, 0, i32(W) - 1));
+    let y1 = u32(clamp(y0i + 1, 0, i32(H) - 1));
+
+    // Sub-texel fractional weights.
+    let fx = clamp(u - f32(x0i), 0.0, 1.0);
+    let fy = clamp(v - f32(y0i), 0.0, 1.0);
+
+    let p00 = unpack_rgba8(tex_data[info.offset + y0 * W + x0]);
+    let p10 = unpack_rgba8(tex_data[info.offset + y0 * W + x1]);
+    let p01 = unpack_rgba8(tex_data[info.offset + y1 * W + x0]);
+    let p11 = unpack_rgba8(tex_data[info.offset + y1 * W + x1]);
+
+    // Bilinear blend: lerp horizontally then vertically.
+    return mix(mix(p00, p10, fx), mix(p01, p11, fx), fy);
+}
+
+/// Samples the HDR environment map in the direction `dir` using an
+/// equirectangular (lat-long) mapping with bilinear filtering.
+///
+/// Mirrors `sample_env()` in trace.wgsl so preview and path-tracer ambient
+/// colours match. Called only when `frame.env_available != 0`.
+///
+/// Convention (Poly Haven / most HDRI tools):
+///   longitude = atan2(dir.x, −dir.z)  →  U = 0 at −Z (forward), increases right
+///   latitude  = asin(dir.y)           →  V = 0 at top (+Y), 1 at bottom
+fn sample_env(dir: vec3<f32>) -> vec3<f32> {
+    let pi     = 3.14159265358979;
+    let two_pi = 6.28318530717959;
+
+    let phi   = atan2(dir.x, -dir.z);                 // [-π, π]
+    let theta = asin(clamp(dir.y, -0.9999, 0.9999));  // [-π/2, π/2]
+
+    let u = phi   / two_pi + 0.5;  // [0, 1]
+    let v = 0.5   - theta  / pi;   // [0, 1], 0 = top
+
+    let W = frame.env_width;
+    let H = frame.env_height;
+
+    // Texel-centre alignment (same -0.5 offset as sample_tex / trace.wgsl).
+    let uf = u * f32(W) - 0.5;
+    let vf = v * f32(H) - 0.5;
+
+    let x0i = i32(floor(uf));
+    let y0i = i32(floor(vf));
+
+    // Wrap U (equirectangular is periodic east-west), clamp V (poles).
+    let x0 = u32(((x0i     % i32(W)) + i32(W)) % i32(W));
+    let x1 = u32((((x0i+1) % i32(W)) + i32(W)) % i32(W));
+    let y0 = u32(clamp(y0i,     0, i32(H) - 1));
+    let y1 = u32(clamp(y0i + 1, 0, i32(H) - 1));
+
+    let fx = clamp(uf - f32(x0i), 0.0, 1.0);
+    let fy = clamp(vf - f32(y0i), 0.0, 1.0);
+
+    let p00 = env_pixels[y0 * W + x0].rgb;
+    let p10 = env_pixels[y0 * W + x1].rgb;
+    let p01 = env_pixels[y1 * W + x0].rgb;
+    let p11 = env_pixels[y1 * W + x1].rgb;
+
+    return mix(mix(p00, p10, fx), mix(p01, p11, fx), fy);
 }
 
 
@@ -201,11 +309,7 @@ fn apply_normal_map(
 // Lighting
 // =============================================================================
 
-// Sun direction — kept consistent with trace.wgsl's SUN_DIR.
-const SUN_DIR:   vec3<f32> = vec3<f32>(0.4,  0.9, 0.3);
-const SUN_COLOR: vec3<f32> = vec3<f32>(4.0,  3.8, 3.0);  // warm white
-
-// Sky gradient colours for hemispherical ambient.
+// Sky gradient colours for the procedural hemispherical ambient fallback.
 // Blend from warm ground to cool blue zenith based on the surface normal's Y.
 const SKY_ZENITH:  vec3<f32> = vec3<f32>(0.25, 0.45, 0.75);  // blue sky
 const SKY_HORIZON: vec3<f32> = vec3<f32>(0.55, 0.65, 0.75);  // pale horizon
@@ -213,16 +317,54 @@ const GROUND_COL:  vec3<f32> = vec3<f32>(0.15, 0.13, 0.10);  // warm dark ground
 
 const PI: f32 = 3.14159265358979;
 
-/// Hemispherical sky ambient — varies the ambient colour based on the surface
-/// normal direction. Surfaces facing up get blue sky; facing down get warm
-/// ground; horizontal surfaces get the horizon colour.
+/// Procedural hemispherical sky ambient — varies the ambient colour based on
+/// the surface normal direction. Surfaces facing up get blue sky; facing down
+/// get warm ground; horizontal surfaces get the horizon colour.
 ///
 /// This is a much better approximation of environment lighting than a flat
-/// ambient constant, and costs one mix() call.
+/// ambient constant, and costs one mix() call. Used as the fallback when no
+/// HDR env map is loaded (or when IBL is disabled).
 fn sky_ambient(N: vec3<f32>) -> vec3<f32> {
     let t = N.y * 0.5 + 0.5;  // maps [-1, 1] → [0, 1]: down=0, up=1
     let sky = mix(SKY_HORIZON, SKY_ZENITH, max(N.y, 0.0));
     return mix(GROUND_COL, sky, t);
+}
+
+/// Returns the ambient sky colour for a given surface normal direction.
+///
+/// When an HDR environment map is loaded and IBL is enabled, samples the real
+/// env map at direction `N` — metallic surfaces will pick up the actual sky
+/// colour from the HDR. Otherwise falls back to the procedural gradient, which
+/// costs almost nothing and still looks good for quick interactive preview.
+///
+/// Either way, the result is scaled by `frame.ibl_scale` so the IBL-scale
+/// slider in the UI affects the rasteriser preview identically to the path tracer.
+fn ambient_color(N: vec3<f32>) -> vec3<f32> {
+    if (frame.env_available != 0u) {
+        return sample_env(N) * frame.ibl_scale;
+    }
+    return sky_ambient(N) * frame.ibl_scale;
+}
+
+/// ACES filmic tonemap (Narkowicz 2015 fit) followed by sRGB gamma encode.
+///
+/// Shared by the geometry fragment shader (`fs_main`) and the sky background
+/// pass (`fs_sky`) so both pipelines produce identical colour for the same
+/// input radiance — no seam visible at the geometry silhouette edge.
+///
+/// Reference: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+fn tonemap(color: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    let mapped = clamp(
+        (color * (a * color + b)) / (color * (c * color + d) + e),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    return pow(mapped, vec3<f32>(1.0 / 2.2));
 }
 
 
@@ -256,17 +398,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let N      = apply_normal_map(mat.normal_texture, uv, N_base, in.world_tangent);
 
     // ---- Lighting vectors ----
-    let L = normalize(SUN_DIR);
+    // Sun direction comes from the per-frame uniform so the azimuth/elevation
+    // sliders in the UI move the highlight in the preview just as they would
+    // in a path-traced render.
+    let L = normalize(frame.sun_dir);
     let V = normalize(camera.cam_pos - in.world_pos);
     let H = normalize(L + V);
 
     let n_dot_l = max(dot(N, L), 0.0);
     let n_dot_h = max(dot(N, H), 0.0);
     let h_dot_v = max(dot(H, V), 0.0);
+    // n_dot_v: cosine of the view-to-normal angle. Used in the ambient Fresnel
+    // term (split-sum IBL approximation: Karis 2013). Clamped to avoid division
+    // artefacts at grazing angles.
+    let n_dot_v = max(dot(N, V), 0.0);
+    // Reflection vector: the direction from which the surface "sees" the environment.
+    // Polished metals and dielectrics will sample the env map at this direction.
+    let R = reflect(-V, N);
+
+    // Warm-white sun colour scaled by the sun-intensity slider.
+    // The base (4.0, 3.8, 3.0) matches the path tracer's SUN_RADIANCE constant,
+    // so the two modes look similar at default settings.
+    let sun_color = vec3<f32>(4.0, 3.8, 3.0) * frame.sun_intensity;
 
     // ---- Diffuse (Lambertian) ----
     // Metals have no diffuse response; their albedo colour goes into F0 instead.
-    let diffuse = albedo * (1.0 - metallic) * n_dot_l * SUN_COLOR;
+    let diffuse = albedo * (1.0 - metallic) * n_dot_l * sun_color;
 
     // ---- Specular (GGX NDF + Schlick Fresnel) ----
     // We skip the geometric attenuation term (G2/Smith) for speed. The GGX
@@ -282,24 +439,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Simple 1/4π denominator approximation (avoids the full Cook-Torrance
     // BRDF denominator — good enough for a preview pass).
-    let specular = (D * F * n_dot_l * SUN_COLOR) * 0.25;
+    let specular = (D * F * n_dot_l * sun_color) * 0.25;
 
-    // ---- Hemispherical ambient ----
-    // Use sky colour on the shading normal so surfaces facing upward get blue
-    // sky and surfaces facing down get warm ground — much more convincing than
-    // a flat constant, at no extra texture lookups.
-    //
-    // Metals have no diffuse response at all — their reflectance is handled
-    // entirely through the specular/Fresnel term. Multiplying by (1-metallic)
-    // zeros out the ambient for fully metallic surfaces, so a dark metallic
-    // dome stays dark rather than picking up a flat sky-coloured glow.
-    //
+    // ---- Hemispherical ambient (diffuse + specular) ----
     // Occlusion texture (R channel): 0 = fully occluded, 1 = fully exposed.
-    // Multiplying ambient by this value darkens crevices and cavities where
-    // indirect light cannot easily reach. Only ambient is affected — direct
-    // sun light is not occluded by this baked term.
+    // Multiplying ambient by this darkens crevices and cavities where indirect
+    // light cannot easily reach. Only ambient is affected — direct sun light is
+    // not occluded by this baked term.
     let occlusion = sample_tex(mat.occlusion_texture, uv).r;
-    let ambient = albedo * sky_ambient(N) * (1.0 - metallic) * occlusion;
+
+    // Diffuse ambient: Lambertian sky/env colour weighted by (1−metallic).
+    // Metals have no diffuse response — their reflectance is all specular.
+    let diffuse_ambient = albedo * ambient_color(N) * (1.0 - metallic) * occlusion;
+
+    // Specular ambient: env/sky colour in the reflection direction, weighted by
+    // the Schlick Fresnel factor evaluated at the view-normal angle (n_dot_v).
+    // This is the split-sum IBL approximation (Karis 2013) without the BRDF
+    // integration LUT — approximate but visually convincing for a preview pass.
+    // For polished metals (metallic ≈ 1) this is the dominant ambient term and
+    // gives the characteristic mirror-like environment reflection. For rough
+    // dielectrics the Fresnel factor is small and the term is a subtle sheen.
+    let F_env = f0 + (1.0 - f0) * pow(1.0 - n_dot_v, 5.0);
+    let specular_ambient = F_env * ambient_color(R) * occlusion;
+
+    let ambient = diffuse_ambient + specular_ambient;
 
     // ---- Emissive ----
     let emissive = mat.emissive * emit_samp;
@@ -311,17 +474,104 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var color = (diffuse + specular + ambient + emissive) * opacity;
 
-    // ACES filmic tonemap + sRGB gamma encode. ACES has an S-curve that keeps
-    // darks dark and punches midtones, giving richer, more saturated output
-    // than Reinhard. Matches the tonemapper used by the path tracer.
-    // (Narkowicz 2015 fit: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/)
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    color = clamp((color * (a * color + b)) / (color * (c * color + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+    // ---- Exposure ----
+    // Applied as linear × 2^stops, matching the path tracer's exposure formula.
+    // Because this is a multiplicative pre-tone-map transform, changing the
+    // exposure slider in the UI updates the preview immediately without
+    // invalidating any cached state.
+    color = color * pow(2.0, frame.exposure);
 
-    return vec4<f32>(color, 1.0);
+    // ACES filmic tonemap + sRGB gamma — via the shared tonemap() helper so
+    // geometry and sky pass produce identical output for the same radiance.
+    return vec4<f32>(tonemap(color), 1.0);
+}
+
+
+// =============================================================================
+// Sky background pass
+// =============================================================================
+//
+// A fullscreen triangle drawn *before* scene geometry in the same render pass.
+// The sky pipeline uses:
+//   depth_compare    = Always          → sky draws regardless of depth buffer
+//   depth_write_enabled = false        → doesn't block geometry drawn after it
+//
+// Geometry drawn afterwards uses depth_compare = Less + depth_write = true, so
+// it overwrites sky pixels wherever actual geometry exists. The result: the sky
+// fills every pixel that no triangle covers, without an extra render pass.
+//
+// Sky direction reconstruction:
+//   Each fragment has an NDC coordinate (nx, ny) ∈ [-1, 1]².
+//   For a perspective projection with x-scale proj[0][0] and y-scale proj[1][1]:
+//     view_dir = normalize(nx / proj[0][0], ny / proj[1][1], -1)
+//   The camera looks along -Z in view space; proj[0][0] = f/aspect,
+//   proj[1][1] = f where f = 1/tan(fov/2).
+//   The upper-left 3×3 of the view matrix (view[col].xyz) is the rotation that
+//   maps world → camera space. Its transpose (= inverse for orthonormal) gives
+//   camera → world, so: world_dir = normalize(transpose(rot3x3) * view_dir).
+
+struct SkyOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0)       ndc:      vec2<f32>,
+}
+
+/// Generates three vertices covering the entire NDC square with one triangle.
+///
+/// The giant-triangle trick avoids the T-junction seam you'd get from two
+/// screen-aligned triangles. A single triangle with corners at (−1,−1),
+/// (3,−1), (−1, 3) covers every pixel in [−1,1]² exactly once.
+@vertex
+fn vs_sky(@builtin(vertex_index) vid: u32) -> SkyOutput {
+    // vid 0 → (−1, −1), vid 1 → (3, −1), vid 2 → (−1, 3)
+    let x = f32(vid & 1u) * 4.0 - 1.0;
+    let y = f32(vid >> 1u) * 4.0 - 1.0;
+    var out: SkyOutput;
+    // z = 1 puts the sky at the far plane in NDC (clip_pos.z / clip_pos.w = 1).
+    // Geometry rendered afterwards has z < 1 and passes the Less depth test,
+    // overwriting sky pixels. The sky never writes to the depth buffer so it
+    // cannot block later geometry.
+    out.clip_pos = vec4<f32>(x, y, 1.0, 1.0);
+    out.ndc      = vec2<f32>(x, y);
+    return out;
+}
+
+/// Samples the sky/env-map colour for the fragment's screen position and
+/// applies exposure + ACES tonemap, matching the geometry pass output exactly.
+@fragment
+fn fs_sky(in: SkyOutput) -> @location(0) vec4<f32> {
+    // ── Reconstruct world-space ray direction ────────────────────────────────
+    // Unproject NDC (nx, ny) through the perspective projection to view space,
+    // then rotate to world space. camera.proj[col][row] in column-major WGSL:
+    //   proj[0][0] = f/aspect  (x-axis scale)
+    //   proj[1][1] = f         (y-axis scale)
+    let view_dir = normalize(vec3<f32>(
+        in.ndc.x / camera.proj[0][0],
+        in.ndc.y / camera.proj[1][1],
+        -1.0,
+    ));
+
+    // Upper-left 3×3 of the view matrix: maps world → camera space.
+    // Transpose (= inverse for orthonormal rotation): maps camera → world.
+    let rot = mat3x3<f32>(
+        camera.view[0].xyz,
+        camera.view[1].xyz,
+        camera.view[2].xyz,
+    );
+    let world_dir = normalize(transpose(rot) * view_dir);
+
+    // ── Sky colour ───────────────────────────────────────────────────────────
+    // Show the HDR env map when it's loaded, IBL is on, and env_background is
+    // set. Otherwise fall back to the procedural gradient — this handles both
+    // "no env map loaded" and "studio mode" (env lights scene but isn't the
+    // backdrop). Either way, ibl_scale lets the user dim or brighten the sky.
+    var sky: vec3<f32>;
+    if (frame.env_available != 0u && frame.env_background != 0u) {
+        sky = sample_env(world_dir) * frame.ibl_scale;
+    } else {
+        sky = sky_ambient(world_dir) * frame.ibl_scale;
+    }
+
+    // Apply exposure and tonemap — same pipeline as fs_main so geometry and
+    // sky colours are consistent at every exposure setting.
+    return vec4<f32>(tonemap(sky * pow(2.0, frame.exposure)), 1.0);
 }

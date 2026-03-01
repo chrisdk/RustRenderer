@@ -147,13 +147,10 @@ pub fn load_scene(bytes: &[u8]) -> Result<(), JsValue> {
 
 /// Loads an HDR environment map from raw `.hdr` (Radiance RGBE) bytes.
 ///
-/// The environment map is used by the path tracer for background sky colour,
-/// ambient lighting, and reflections in metallic surfaces. Call this after
-/// `init_renderer`. Can be called again to swap environments without reloading
-/// the scene.
-///
-/// The rasteriser continues to use its procedural sky gradient; this only
-/// affects the path-traced output from the "Render" button.
+/// The environment map is used by both the path tracer and the rasteriser
+/// preview for background sky colour, ambient lighting, and reflections in
+/// metallic surfaces. Call this after `init_renderer`. Can be called again
+/// to swap environments without reloading the scene.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
@@ -182,6 +179,10 @@ pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
 /// neutral dark grey instead — giving a "studio lighting" look where the env
 /// map still illuminates the scene but is not visible as the background.
 ///
+/// Affects path-traced output only. The rasteriser does not render background
+/// sky pixels (they use the fixed clear colour); use `set_ibl_enabled` to
+/// toggle whether the env map is used for ambient shading in the preview.
+///
 /// Changes take effect on the next `render()` call. To avoid blending old and
 /// new samples, start a fresh render by passing `sample_index = 0`.
 #[cfg(target_arch = "wasm32")]
@@ -198,9 +199,9 @@ pub fn set_env_background(visible: bool) {
 /// Removes the currently loaded HDR environment map and reverts to the
 /// procedural sky gradient.
 ///
-/// After this call the path tracer behaves as if `load_environment` had never
-/// been called: background and IBL both come from the procedural sky. The
-/// rasteriser preview is unaffected (it always uses its own procedural sky).
+/// After this call both the path tracer and the rasteriser preview behave as if
+/// `load_environment` had never been called: background and IBL both come from
+/// the procedural sky.
 ///
 /// This is a no-op if no environment map is currently loaded.
 #[cfg(target_arch = "wasm32")]
@@ -213,16 +214,18 @@ pub fn unload_environment() {
     });
 }
 
-/// Enables or disables Image-Based Lighting for path-traced renders.
+/// Enables or disables Image-Based Lighting.
 ///
-/// When `enabled` is `true` (the default), the loaded HDR environment map
-/// is used for the background, ambient lighting, and reflections. When
-/// `false`, the path tracer falls back to the procedural sky gradient even
-/// if an env map is loaded — useful for A/B comparisons or artistic control.
+/// When `enabled` is `true` (the default), the loaded HDR environment map is
+/// used for ambient lighting and reflections in both the rasteriser preview and
+/// the path tracer. When `false`, both renderers fall back to the procedural sky
+/// gradient even if an env map is loaded — useful for A/B comparisons or artistic
+/// control.
 ///
-/// Has no effect on the rasteriser preview, which always uses its own
-/// procedural sky. Changes take effect on the next `render()` call. To avoid
-/// blending old and new samples, start a fresh render by passing `sample_index = 0`.
+/// Changes to the rasteriser preview take effect immediately on the next
+/// `raster_frame()` call. Changes to the path tracer take effect on the next
+/// `render()` call; start a fresh render (`sample_index = 0`) to avoid blending
+/// old (IBL) and new (procedural sky) samples.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn set_ibl_enabled(enabled: bool) {
@@ -494,6 +497,10 @@ pub async fn get_pixels(width: u32, height: u32) -> js_sys::Uint8Array {
 /// (`render`), it produces a single fully-formed frame with no progressive
 /// accumulation — call `raster_get_pixels` immediately after to retrieve it.
 ///
+/// All user-adjustable controls (sun azimuth/elevation, sun intensity, exposure,
+/// IBL scale, IBL enabled/disabled, and any loaded HDR env map) are reflected in
+/// the preview frame just as they are in the path-traced output.
+///
 /// Requires both `init_renderer` and `load_scene` to have been called first.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -511,10 +518,41 @@ pub fn raster_frame(width: u32, height: u32) {
 
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
-            // render_frame takes device+queue as parameters; borrow them
-            // from the path-tracer renderer (same GPU device).
+            // ── Build RasterFrameUniforms from current renderer state ─────────
+            // Convert azimuth + elevation to a world-space unit direction vector.
+            // Convention: azimuth measured from +Z toward +X (same as the
+            // path-tracer's frame.sun_azimuth / frame.sun_elevation fields).
+            let az     = state.renderer.sun_azimuth;
+            let el     = state.renderer.sun_elevation;
+            let cos_el = el.cos();
+            let sun_dir = [az.sin() * cos_el, el.sin(), az.cos() * cos_el];
+
+            // env_available = 1 only when an HDR map is loaded AND IBL is on.
+            // env_dims is (0,0) when using the dummy 1×1 black pixel, so
+            // checking for non-zero is sufficient to detect "real env loaded".
+            let env_dims  = state.renderer.env_dims();
+            let env_avail = u32::from(env_dims != (0, 0) && state.renderer.ibl_enabled);
+
+            let frame = renderer::raster::RasterFrameUniforms {
+                sun_dir,
+                sun_intensity:  state.renderer.sun_intensity,
+                exposure:       state.renderer.exposure,
+                ibl_scale:      state.renderer.ibl_scale,
+                env_available:  env_avail,
+                env_width:      env_dims.0,
+                env_height:     env_dims.1,
+                // env_background mirrors the path tracer flag: when true, the sky
+                // pass samples the env map / procedural sky as the visible backdrop.
+                env_background: u32::from(state.renderer.env_background),
+                _pad:           [0; 2],
+            };
+
+            // render_frame borrows device+queue from the path-tracer renderer
+            // (both pipelines share the same underlying GPU device), and borrows
+            // env_pixels so the env map is never duplicated in GPU memory.
+            let env_pixels = state.renderer.env_pixels_buf();
             let (device, queue) = state.renderer.device_queue();
-            state.raster.render_frame(device, queue, width, height);
+            state.raster.render_frame(device, queue, width, height, &frame, env_pixels);
         }
     });
 }

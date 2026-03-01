@@ -320,6 +320,26 @@ impl Renderer {
     pub fn device_queue(&self) -> (&wgpu::Device, &wgpu::Queue) {
         (&self.device, &self.queue)
     }
+
+    /// Borrows the environment-pixel storage buffer.
+    ///
+    /// Always valid — contains a 1×1 black pixel before any env map is loaded,
+    /// replaced by [`upload_environment`]. The rasteriser binds this buffer
+    /// directly so it never needs its own copy of the environment data.
+    ///
+    /// [`upload_environment`]: Self::upload_environment
+    pub(crate) fn env_pixels_buf(&self) -> &wgpu::Buffer {
+        &self.env_pixels_buf
+    }
+
+    /// Returns the dimensions `(width, height)` of the currently loaded
+    /// environment map, or `(0, 0)` when using the dummy 1×1 black pixel.
+    ///
+    /// The rasteriser uses this to decide whether to sample the env map or
+    /// fall back to the procedural sky gradient.
+    pub(crate) fn env_dims(&self) -> (u32, u32) {
+        self.env_dims
+    }
 }
 
 // ============================================================================

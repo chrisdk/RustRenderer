@@ -41,6 +41,11 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+# naga is wgpu's shader compiler. Pulling it in as a dev-dep lets us validate
+# WGSL shaders at `cargo test` time — catching invalid types in var<uniform>,
+# mismatched struct layouts, and other errors that would only surface at runtime
+# in the browser (as a silent black canvas with no Rust-side panic).
+naga      = { version = "28", features = ["wgsl-in"] }
 
 [[bench]]
 name = "renderer"

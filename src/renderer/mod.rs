@@ -155,3 +155,158 @@ mod tests {
         let _: &[u8] = bytemuck::bytes_of(&GpuTexInfo::zeroed());
     }
 }
+
+// ============================================================================
+// Shader tests
+// ============================================================================
+//
+// These tests validate WGSL shaders using naga — the same shader compiler that
+// wgpu (and the browser's WebGPU implementation) uses internally.
+//
+// Why? Two categories of bug are invisible to `cargo build` and only surface at
+// runtime in the browser, typically as a silent black canvas:
+//
+//   1. **Invalid WGSL** — e.g. using `array<u32, 3>` in `var<uniform>`.
+//      WGSL's uniform address space requires array element types to have
+//      16-byte alignment; `u32` has only 4-byte alignment. The Rust code
+//      compiles fine, the shader module is created without a Rust-side
+//      error (WebGPU reports errors asynchronously), and every draw call
+//      silently becomes a no-op.
+//
+//   2. **Rust/WGSL layout mismatch** — e.g. adding a field to a Rust struct
+//      and forgetting to add it to the matching WGSL struct. The Rust layout
+//      test passes (the struct has the right offsets), the WGSL compiles (the
+//      shader has its own self-consistent layout), but the bytes the GPU reads
+//      from the uniform buffer don't match what Rust wrote. Result: wrong sun
+//      direction, wrong exposure, garbled material data — all silent.
+//
+// These tests run on the CPU in the normal `cargo test` pass, with no GPU or
+// browser required. They catch both classes of bug before a build is needed.
+
+#[cfg(test)]
+mod shader_tests {
+    use naga::valid::{Capabilities, ValidationFlags, Validator};
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Parse a WGSL source string and fully validate it with naga.
+    ///
+    /// Panics with the naga error message on parse or validation failure,
+    /// making the test output point directly at the problem.
+    fn validate(label: &str, source: &str) -> naga::Module {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{label}: WGSL parse error:\n{e:#?}"));
+        let mut v = Validator::new(ValidationFlags::all(), Capabilities::default());
+        v.validate(&module)
+            .unwrap_or_else(|e| panic!("{label}: WGSL validation error:\n{e:#?}"));
+        module
+    }
+
+    /// Find a named struct's member list inside a naga module.
+    ///
+    /// Panics if the struct is absent — a missing struct is itself a bug worth
+    /// surfacing loudly.
+    fn struct_members<'m>(module: &'m naga::Module, name: &str) -> &'m [naga::StructMember] {
+        for (_, ty) in module.types.iter() {
+            if ty.name.as_deref() == Some(name) {
+                if let naga::TypeInner::Struct { members, .. } = &ty.inner {
+                    return members;
+                }
+            }
+        }
+        panic!("struct {name:?} not found in WGSL module");
+    }
+
+    /// Look up one member's byte offset by name.
+    ///
+    /// Panics if the field is missing — if a field was removed from WGSL but
+    /// not from Rust (or vice-versa) we want to know about it immediately.
+    fn field_offset(members: &[naga::StructMember], field: &str) -> u32 {
+        members
+            .iter()
+            .find(|m| m.name.as_deref() == Some(field))
+            .unwrap_or_else(|| panic!("field {field:?} not found in WGSL struct"))
+            .offset
+    }
+
+    // ── Shader validity ───────────────────────────────────────────────────────
+
+    /// `raster.wgsl` must parse and validate cleanly with naga.
+    ///
+    /// This catches any WGSL type error that would cause silent failure in the
+    /// browser. The most dangerous class: types that are valid in
+    /// `var<storage>` but rejected in `var<uniform>` (e.g. `array<u32, N>`,
+    /// which requires 16-byte element alignment in the uniform address space).
+    #[test]
+    fn test_raster_wgsl_validates() {
+        validate("raster.wgsl", include_str!("../shaders/raster.wgsl"));
+    }
+
+    /// `trace.wgsl` must parse and validate cleanly with naga.
+    #[test]
+    fn test_trace_wgsl_validates() {
+        validate("trace.wgsl", include_str!("../shaders/trace.wgsl"));
+    }
+
+    // ── Rust ↔ WGSL layout cross-checks ──────────────────────────────────────
+    //
+    // The Rust structs already have `offset_of!` tests in their own modules,
+    // confirming the Rust side is self-consistent. These tests ask a different
+    // question: does the *WGSL* struct agree with the Rust struct, field by
+    // field? naga computes the authoritative WGSL offsets using the same
+    // layout rules the GPU will actually apply at runtime.
+    //
+    // If a field is added to one side and forgotten on the other, the offset
+    // check for the first mismatched field will fail and name the culprit.
+
+    /// `RasterFrame` in `raster.wgsl` must have the same field offsets as
+    /// `RasterFrameUniforms` in Rust.
+    ///
+    /// The bug that prompted these tests: `_pad: array<u32, 3>` was written
+    /// in the WGSL struct but is illegal in `var<uniform>`. naga rejects it,
+    /// so this test would have failed before the fix was applied — catching
+    /// the bug at `cargo test` time instead of at runtime in the browser.
+    #[test]
+    fn test_raster_frame_wgsl_layout_matches_rust() {
+        use crate::renderer::raster::RasterFrameUniforms;
+        use std::mem::offset_of;
+
+        let module = validate("raster.wgsl", include_str!("../shaders/raster.wgsl"));
+        let m = struct_members(&module, "RasterFrame");
+
+        assert_eq!(field_offset(m, "sun_dir"),        offset_of!(RasterFrameUniforms, sun_dir)        as u32);
+        assert_eq!(field_offset(m, "sun_intensity"),  offset_of!(RasterFrameUniforms, sun_intensity)  as u32);
+        assert_eq!(field_offset(m, "exposure"),       offset_of!(RasterFrameUniforms, exposure)       as u32);
+        assert_eq!(field_offset(m, "ibl_scale"),      offset_of!(RasterFrameUniforms, ibl_scale)      as u32);
+        assert_eq!(field_offset(m, "env_available"),  offset_of!(RasterFrameUniforms, env_available)  as u32);
+        assert_eq!(field_offset(m, "env_width"),      offset_of!(RasterFrameUniforms, env_width)      as u32);
+        assert_eq!(field_offset(m, "env_height"),     offset_of!(RasterFrameUniforms, env_height)     as u32);
+        assert_eq!(field_offset(m, "env_background"), offset_of!(RasterFrameUniforms, env_background) as u32);
+    }
+
+    /// `FrameUniforms` in `trace.wgsl` must have the same field offsets as
+    /// `FrameUniforms` in Rust (`src/renderer/gpu.rs`).
+    #[test]
+    fn test_frame_uniforms_wgsl_layout_matches_rust() {
+        use crate::renderer::gpu::FrameUniforms;
+        use std::mem::offset_of;
+
+        let module = validate("trace.wgsl", include_str!("../shaders/trace.wgsl"));
+        let m = struct_members(&module, "FrameUniforms");
+
+        assert_eq!(field_offset(m, "width"),             offset_of!(FrameUniforms, width)             as u32);
+        assert_eq!(field_offset(m, "height"),            offset_of!(FrameUniforms, height)            as u32);
+        assert_eq!(field_offset(m, "sample_index"),      offset_of!(FrameUniforms, sample_index)      as u32);
+        assert_eq!(field_offset(m, "flags"),             offset_of!(FrameUniforms, flags)             as u32);
+        assert_eq!(field_offset(m, "env_width"),         offset_of!(FrameUniforms, env_width)         as u32);
+        assert_eq!(field_offset(m, "env_height"),        offset_of!(FrameUniforms, env_height)        as u32);
+        assert_eq!(field_offset(m, "env_background"),    offset_of!(FrameUniforms, env_background)    as u32);
+        assert_eq!(field_offset(m, "env_sample_weight"), offset_of!(FrameUniforms, env_sample_weight) as u32);
+        assert_eq!(field_offset(m, "max_bounces"),       offset_of!(FrameUniforms, max_bounces)       as u32);
+        assert_eq!(field_offset(m, "sun_azimuth"),       offset_of!(FrameUniforms, sun_azimuth)       as u32);
+        assert_eq!(field_offset(m, "sun_elevation"),     offset_of!(FrameUniforms, sun_elevation)     as u32);
+        assert_eq!(field_offset(m, "sun_intensity"),     offset_of!(FrameUniforms, sun_intensity)     as u32);
+        assert_eq!(field_offset(m, "ibl_scale"),         offset_of!(FrameUniforms, ibl_scale)         as u32);
+        assert_eq!(field_offset(m, "exposure"),          offset_of!(FrameUniforms, exposure)          as u32);
+    }
+}

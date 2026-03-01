@@ -23,13 +23,25 @@
 //! | 0     | 2       | materials   | storage | fragment           |
 //! | 0     | 3       | tex_data    | storage | fragment           |
 //! | 0     | 4       | tex_info    | storage | fragment           |
+//! | 0     | 5       | frame       | uniform | fragment           |
+//! | 0     | 6       | env_pixels  | storage | fragment           |
 //!
 //! ## Rendering approach
 //!
-//! One draw call per `MeshInstance`. All vertices live in a single shared
-//! vertex buffer; all indices in a single index buffer. Instance transforms
-//! and material indices are packed into a `GpuInstance` storage buffer,
-//! indexed by the builtin `instance_index` in the vertex shader.
+//! Each frame consists of two sub-passes within a single `RenderPass`:
+//!
+//! 1. **Sky pass** — draws a giant fullscreen triangle (`vs_sky` / `fs_sky`).
+//!    Uses `depth_compare = Always` and `depth_write_enabled = false` so it
+//!    paints every pixel without touching the depth buffer. When an HDR env
+//!    map is loaded and `env_background` is set, it samples the env map;
+//!    otherwise it renders the procedural sky gradient.
+//!
+//! 2. **Geometry pass** — one draw call per `MeshInstance`. All vertices live
+//!    in a single shared vertex buffer; all indices in a single index buffer.
+//!    Instance transforms and material indices are packed into a `GpuInstance`
+//!    storage buffer, indexed by the builtin `instance_index`. Uses
+//!    `depth_compare = Less` + `depth_write_enabled = true` so geometry
+//!    correctly overwrites sky pixels and depth-tests between instances.
 
 use crate::camera::RasterCameraUniform;
 use crate::scene::{geometry::Vertex, material::Material, Scene};
@@ -38,6 +50,50 @@ use crate::scene::{geometry::Vertex, material::Material, Scene};
 // =============================================================================
 // Supporting types
 // =============================================================================
+
+/// Per-frame lighting / environment controls uploaded to the rasteriser.
+///
+/// 48 bytes (three 16-byte blocks). Must match the `RasterFrame` struct in
+/// `raster.wgsl` exactly; the `bytemuck::Pod` derive means it is cast
+/// directly to bytes and stuffed into a GPU uniform buffer.
+///
+/// | Offset | Field          | Size |
+/// |--------|----------------|------|
+/// | 0      | sun_dir        |  12  |
+/// | 12     | sun_intensity  |   4  |
+/// | 16     | exposure       |   4  |
+/// | 20     | ibl_scale      |   4  |
+/// | 24     | env_available  |   4  |
+/// | 28     | env_width      |   4  |
+/// | 32     | env_height     |   4  |
+/// | 36     | env_background |   4  |
+/// | 40     | _pad           |   8  |
+/// | Total  |                |  48  |
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RasterFrameUniforms {
+    /// Normalised world-space direction toward the sun (not from it).
+    pub sun_dir:        [f32; 3],
+    /// Radiance multiplier for the analytical sun. 0 = off, 1 = default.
+    pub sun_intensity:  f32,
+    /// Exposure in EV stops; applied as `linear × 2^exposure` before ACES.
+    pub exposure:       f32,
+    /// Linear multiplier for all sky / env-map ambient contributions.
+    pub ibl_scale:      f32,
+    /// 1 when an HDR env map is loaded **and** IBL is enabled; 0 otherwise.
+    /// The shader samples `env_pixels` only when this flag is set.
+    pub env_available:  u32,
+    /// Width of the env map in pixels (used for UV → texel conversion).
+    pub env_width:      u32,
+    /// Height of the env map in pixels.
+    pub env_height:     u32,
+    /// 1 = draw the env map / sky as the scene background (sky pass);
+    /// 0 = skip env-map background (studio mode: env lights the scene but
+    /// is not visible as the backdrop).
+    pub env_background: u32,
+    /// Padding to reach a 16-byte-multiple total size (WGSL uniform requirement).
+    pub _pad:           [u32; 2],
+}
 
 /// Per-instance GPU data: the model transform + which material to shade with.
 ///
@@ -77,8 +133,12 @@ struct DrawCall {
 /// rather than stored here.
 pub struct RasterRenderer {
     // ── Pipeline (built eagerly in upload_scene to surface shader errors early) ──
-    bgl:      Option<wgpu::BindGroupLayout>,
-    pipeline: Option<wgpu::RenderPipeline>,
+    bgl:          Option<wgpu::BindGroupLayout>,
+    /// Geometry pipeline: PBR shading for scene instances.
+    pipeline:     Option<wgpu::RenderPipeline>,
+    /// Sky background pipeline: fullscreen triangle, depth_compare = Always,
+    /// depth_write_enabled = false. Drawn first so geometry overwrites it.
+    sky_pipeline: Option<wgpu::RenderPipeline>,
 
     // ── Scene data (uploaded once per loaded scene) ──────────────────────────
     vertex_buf:   Option<wgpu::Buffer>,
@@ -94,6 +154,9 @@ pub struct RasterRenderer {
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     camera_buf: Option<wgpu::Buffer>,
+    /// Per-frame lighting controls: sun direction, intensity, exposure, IBL scale,
+    /// and env-map dimensions. Created on first `render_frame`, updated every frame.
+    frame_buf:  Option<wgpu::Buffer>,
 
     // ── Render targets (recreated when resolution changes) ───────────────────
     output_tex: Option<wgpu::Texture>,
@@ -116,6 +179,7 @@ impl RasterRenderer {
         Self {
             bgl:          None,
             pipeline:     None,
+            sky_pipeline: None,
             vertex_buf:   None,
             index_buf:    None,
             instance_buf: None,
@@ -124,6 +188,7 @@ impl RasterRenderer {
             tex_info_buf: None,
             draw_calls:   Vec::new(),
             camera_buf:   None,
+            frame_buf:    None,
             output_tex:   None,
             depth_tex:    None,
             readback_buf: None,
@@ -360,6 +425,30 @@ impl RasterRenderer {
                     },
                     count: None,
                 },
+                // Binding 5: per-frame lighting uniforms (sun, exposure, IBL)
+                wgpu::BindGroupLayoutEntry {
+                    binding:    5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
+                // Binding 6: HDR environment map pixels (vec4<f32> per pixel).
+                // Shared with the path tracer — never duplicated. Always bound;
+                // `env_available` in binding 5 tells the shader whether to use it.
+                wgpu::BindGroupLayoutEntry {
+                    binding:    6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -432,8 +521,57 @@ impl RasterRenderer {
             cache:          None,
         });
 
-        self.bgl      = Some(bgl);
-        self.pipeline = Some(pipeline);
+        // ── Sky background pipeline ──────────────────────────────────────────
+        // Draws a fullscreen triangle (no vertex buffer, `vs_sky` generates
+        // positions from vertex_index). Uses the same bind group layout and
+        // shader module as the geometry pipeline but with different depth state:
+        //   depth_write_enabled = false  → sky doesn't clobber the depth buffer
+        //   depth_compare = Always       → sky always renders (depth_clear = 1.0,
+        //                                  geometry at depth < 1 overwrites it)
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label:  Some("raster_sky_pipeline"),
+            layout: Some(&layout),  // same layout — same bind group works for both
+
+            vertex: wgpu::VertexState {
+                module:             &shader,
+                entry_point:        Some("vs_sky"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers:            &[],  // no vertex buffer; positions come from vertex_index
+            },
+
+            fragment: Some(wgpu::FragmentState {
+                module:             &shader,
+                entry_point:        Some("fs_sky"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format:     wgpu::TextureFormat::Rgba8Unorm,
+                    blend:      None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+
+            primitive: wgpu::PrimitiveState {
+                topology:           wgpu::PrimitiveTopology::TriangleList,
+                cull_mode:          None,  // the giant triangle faces the camera; no culling needed
+                ..Default::default()
+            },
+
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format:              wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,                        // must not write depth
+                depth_compare:       wgpu::CompareFunction::Always, // always draw sky
+                stencil:             wgpu::StencilState::default(),
+                bias:                wgpu::DepthBiasState::default(),
+            }),
+
+            multisample:    wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache:          None,
+        });
+
+        self.bgl          = Some(bgl);
+        self.pipeline     = Some(pipeline);
+        self.sky_pipeline = Some(sky_pipeline);
 
         log::info!("raster pipeline ready");
     }
@@ -447,11 +585,41 @@ impl RasterRenderer {
     /// Draws all scene instances and stores the result in an internal
     /// output texture.
     ///
+    /// `frame` carries the per-frame lighting controls (sun direction, exposure,
+    /// IBL scale, env-map dimensions). `env_pixels` is the HDR environment-map
+    /// storage buffer borrowed from the path-tracer renderer — binding it directly
+    /// avoids duplicating potentially large pixel data.
+    ///
     /// Panics if [`upload_scene`] or [`upload_camera`] has not been called.
-    pub fn render_frame(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
+    pub fn render_frame(
+        &mut self,
+        device:     &wgpu::Device,
+        queue:      &wgpu::Queue,
+        width:      u32,
+        height:     u32,
+        frame:      &RasterFrameUniforms,
+        env_pixels: &wgpu::Buffer,
+    ) {
         assert!(self.is_scene_loaded(), "render_frame called before upload_scene");
         assert!(self.camera_buf.is_some(), "render_frame called before upload_camera");
         assert!(self.pipeline.is_some(), "render_frame called before pipeline was built");
+
+        // ── Upload per-frame uniforms ─────────────────────────────────────────
+        // Create the buffer on the first call; write_buffer on every subsequent frame.
+        let frame_data = bytemuck::bytes_of(frame);
+        match &self.frame_buf {
+            Some(buf) => queue.write_buffer(buf, 0, frame_data),
+            None => {
+                use wgpu::util::DeviceExt;
+                self.frame_buf = Some(device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label:    Some("raster_frame_uniform"),
+                        contents: frame_data,
+                        usage:    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+            }
+        }
 
         // ── (Re)create render targets when resolution changes ────────────────
         if self.output_dims != (width, height) {
@@ -521,6 +689,14 @@ impl RasterRenderer {
                     binding:  4,
                     resource: self.tex_info_buf.as_ref().expect("upload_scene not called").as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding:  5,
+                    resource: self.frame_buf.as_ref().expect("frame buffer not created").as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  6,
+                    resource: env_pixels.as_entire_binding(),
+                },
             ],
         });
 
@@ -537,10 +713,11 @@ impl RasterRenderer {
                     resolve_target: None,
                     depth_slice:    None,  // None for 2D textures (only used for 3D texture slices)
                     ops: wgpu::Operations {
-                        // Sky blue-grey clear colour — consistent with the path
-                        // tracer's sky at the horizon so the background matches.
+                        // Black clear — the sky pass immediately overwrites every
+                        // pixel, so the clear colour is never visible. Black is
+                        // a safe fallback if the sky pipeline somehow doesn't draw.
                         load:  wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.18, g: 0.20, b: 0.25, a: 1.0,
+                            r: 0.0, g: 0.0, b: 0.0, a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -558,8 +735,21 @@ impl RasterRenderer {
                 multiview_mask:      None,
             });
 
-            pass.set_pipeline(self.pipeline.as_ref().expect("build_pipeline not called"));
+            // ── Sky pass ────────────────────────────────────────────────────
+            // Draw a fullscreen triangle first. The sky pipeline has
+            //   depth_compare = Always       → always writes colour
+            //   depth_write_enabled = false  → depth buffer unchanged (stays 1.0)
+            // so the geometry pass drawn immediately after can overwrite sky
+            // pixels wherever real triangles exist (their depth < 1.0 passes
+            // the Less test against the clear value of 1.0).
+            pass.set_pipeline(self.sky_pipeline.as_ref().expect("build_pipeline not called"));
             pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);  // 3 vertices → 1 giant triangle, no vertex buffer needed
+
+            // ── Geometry pass ────────────────────────────────────────────────
+            pass.set_pipeline(self.pipeline.as_ref().expect("build_pipeline not called"));
+            // set_bind_group not repeated: the same bind group stays active after
+            // a pipeline switch when both pipelines share the same layout.
             pass.set_vertex_buffer(0, self.vertex_buf.as_ref().expect("upload_scene not called").slice(..));
             pass.set_index_buffer(
                 self.index_buf.as_ref().expect("upload_scene not called").slice(..),
@@ -672,6 +862,26 @@ mod tests {
     use super::*;
     use bytemuck::Zeroable;
     use std::mem::{offset_of, size_of};
+
+    /// `RasterFrameUniforms` is uploaded verbatim to binding 5 every frame.
+    /// The WGSL `RasterFrame` struct must match byte-for-byte. Getting this wrong
+    /// means the shader reads garbage for sun direction, exposure, or IBL scale —
+    /// usually manifesting as a pitch-black preview or wildly wrong sun angle.
+    #[test]
+    fn test_raster_frame_uniforms_layout() {
+        assert_eq!(size_of::<RasterFrameUniforms>(), 48,
+            "RasterFrameUniforms must be 48 bytes (multiple of 16 for WGSL uniforms)");
+        assert_eq!(offset_of!(RasterFrameUniforms, sun_dir),         0);
+        assert_eq!(offset_of!(RasterFrameUniforms, sun_intensity),  12);
+        assert_eq!(offset_of!(RasterFrameUniforms, exposure),       16);
+        assert_eq!(offset_of!(RasterFrameUniforms, ibl_scale),      20);
+        assert_eq!(offset_of!(RasterFrameUniforms, env_available),  24);
+        assert_eq!(offset_of!(RasterFrameUniforms, env_width),      28);
+        assert_eq!(offset_of!(RasterFrameUniforms, env_height),     32);
+        assert_eq!(offset_of!(RasterFrameUniforms, env_background), 36);
+        assert_eq!(offset_of!(RasterFrameUniforms, _pad),           40);
+        let _: &[u8] = bytemuck::bytes_of(&RasterFrameUniforms::zeroed());
+    }
 
     /// `GpuInstance` is packed into a storage buffer read by the vertex shader.
     /// The WGSL `InstanceData` struct must match byte-for-byte. A silent drift
