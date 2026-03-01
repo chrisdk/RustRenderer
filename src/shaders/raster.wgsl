@@ -466,15 +466,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Metals have no diffuse response — their reflectance is all specular.
     let diffuse_ambient = albedo * ambient_color(N) * (1.0 - metallic) * occlusion;
 
-    // Specular ambient: env/sky colour in the reflection direction, weighted by
-    // the Schlick Fresnel factor evaluated at the view-normal angle (n_dot_v).
-    // This is the split-sum IBL approximation (Karis 2013) without the BRDF
-    // integration LUT — approximate but visually convincing for a preview pass.
-    // For polished metals (metallic ≈ 1) this is the dominant ambient term and
-    // gives the characteristic mirror-like environment reflection. For rough
-    // dielectrics the Fresnel factor is small and the term is a subtle sheen.
-    let F_env = f0 + (1.0 - f0) * pow(1.0 - n_dot_v, 5.0);
-    let specular_ambient = F_env * ambient_color(R) * occlusion;
+    // Specular ambient: env/sky colour in the reflection direction, scaled by
+    // the Karis 2013 analytical BRDF LUT approximation ("Real Shading in
+    // Unreal Engine 4", SIGGRAPH 2013).
+    //
+    // The naive approach — using raw Schlick Fresnel (F0 + (1−F0)·(1−NdotV)⁵)
+    // — is badly wrong for rough surfaces at grazing angles. Schlick approaches
+    // 1.0 regardless of roughness when NdotV is small, so every surface becomes
+    // a near-perfect mirror in IBL. A rough dielectric with roughness=0.8 at a
+    // 70° view angle gets Schlick ≈ 0.20 — making it look chrome-plated even
+    // though F0 = 0.04. The path tracer avoids this by scattering GGX rays over
+    // the full microfacet lobe; the rasterizer can't do that without a
+    // prefiltered env map, so we use the BRDF LUT instead.
+    //
+    // The LUT encodes the integral ∫ f(l,v)·NdotL dl over the GGX lobe as a
+    // (scale, bias) pair indexed by (roughness, NdotV):
+    //   specular = F0 * scale + bias
+    // For rough surfaces at grazing angles, scale→0 and bias→0, correctly
+    // suppressing the specular ambient to near-zero. For smooth mirrors
+    // (roughness→0), scale→1 and bias→0, recovering the Fresnel response.
+    // This is an analytical fit, so no texture lookup is required.
+    let brdf_c0  = vec4<f32>(-1.0, -0.0275, -0.572,  0.022);
+    let brdf_c1  = vec4<f32>( 1.0,  0.0425,  1.04,  -0.04);
+    let brdf_r   = roughness * brdf_c0 + brdf_c1;
+    let brdf_a   = min(brdf_r.x * brdf_r.x, exp2(-9.28 * n_dot_v)) * brdf_r.x + brdf_r.y;
+    let brdf_ab  = vec2<f32>(-1.04, 1.04) * brdf_a + brdf_r.zw;
+    let specular_ambient = (f0 * brdf_ab.x + brdf_ab.y) * ambient_color(R) * occlusion;
 
     let ambient = diffuse_ambient + specular_ambient;
 
