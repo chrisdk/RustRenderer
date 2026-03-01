@@ -187,9 +187,28 @@ export class RenderController {
         const { w, h } = this.deps.getCanvasSize();
         this.deps.lockCamera(w, h);
 
+        // Tracks whether the compute shader silently failed (all-zero output).
+        // Kept separate from hqCancelled so the post-loop status message can
+        // be specific rather than showing the generic "render cancelled" text.
+        let computeFailed = false;
+
         for (let i = 0; i < this.hqSamples && !this.hqCancelled; i++) {
             this.deps.render(w, h, i, false);
             const pixels = await this.deps.get_pixels(w, h);
+
+            // After the very first sample, sanity-check that the compute shader
+            // actually ran. Every valid pixel has alpha = 255; an all-zero buffer
+            // means the GPU silently rejected our dispatch — typically because the
+            // shader exceeds a device limit. Our path tracer binds 10 storage
+            // buffers; the WebGPU minimum guarantee is 8, and iOS/Metal
+            // implementations often enforce exactly that floor.
+            // Don't paint the canvas when this happens — leave the raster preview.
+            if (i === 0 && !pixels.some(v => v > 0)) {
+                computeFailed    = true;
+                this.hqCancelled = true;
+                break;
+            }
+
             this.deps.putImageData(pixels, w, h);
             this.deps.setStatus(`Rendering… ${i + 1} / ${this.hqSamples} spp`);
         }
@@ -199,7 +218,12 @@ export class RenderController {
         this.hqRendering = false;
         this.deps.onHqEnd(wasCancelled);
 
-        if (wasCancelled) {
+        if (computeFailed) {
+            this.deps.setStatus(
+                'Path tracer not supported on this device — ' +
+                'try a desktop browser with WebGPU'
+            );
+        } else if (wasCancelled) {
             this.deps.setStatus('Render cancelled — drag to spin');
             this.cameraDirty = true;
         } else {

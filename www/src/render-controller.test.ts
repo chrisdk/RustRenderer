@@ -18,7 +18,9 @@ function makeDeps(): RenderDeps {
         load_scene:        vi.fn(),
         get_scene_bounds:  vi.fn(() => new Float32Array([0, 0, 0, 1, 1, 1])),
         render:            vi.fn(),
-        get_pixels:        vi.fn(async () => new Uint8Array(4)),
+        // Return a minimal non-zero pixel (alpha = 255) so the compute-failure
+        // detector in startHighQualityRender doesn't trigger by default.
+        get_pixels:        vi.fn(async () => new Uint8Array([0, 0, 0, 255])),
         raster_frame:      vi.fn(),
         raster_get_pixels: vi.fn(async () => new Uint8Array(4)),
         putImageData:      vi.fn(),
@@ -180,7 +182,7 @@ describe('startHighQualityRender', () => {
         deps.get_pixels = vi.fn(async () => {
             // Cancel after the second sample completes.
             if (++callCount === 2) ctrl.hqCancelled = true;
-            return new Uint8Array(4);
+            return new Uint8Array([0, 0, 0, 255]);
         });
 
         await ctrl.startHighQualityRender();
@@ -190,6 +192,29 @@ describe('startHighQualityRender', () => {
         expect(ctrl.cameraDirty).toBe(true);
         expect(ctrl.rendering).toBe(false);
         expect(ctrl.hqRendering).toBe(false);
+    });
+
+    it('aborts with a device-unsupported error when sample 0 returns all-zero pixels', async () => {
+        const { ctrl, deps } = make(4);
+        ctrl.sceneLoaded = true;
+        // All-zero pixels simulate a compute shader that the device silently ignored.
+        deps.get_pixels = vi.fn(async () => new Uint8Array(4));
+
+        await ctrl.startHighQualityRender();
+
+        // Only one render call — the loop breaks immediately after sample 0.
+        expect(deps.render).toHaveBeenCalledTimes(1);
+        // The raster preview must not be overwritten with a blank frame.
+        expect(deps.putImageData).not.toHaveBeenCalled();
+        // User should see a human-readable explanation, not the generic cancel message.
+        expect(deps.setStatus).toHaveBeenLastCalledWith(
+            expect.stringContaining('not supported'),
+        );
+        // State flags must be fully reset so the app isn't stuck.
+        expect(ctrl.rendering).toBe(false);
+        expect(ctrl.hqRendering).toBe(false);
+        // cameraDirty should stay false — no camera move happened.
+        expect(ctrl.cameraDirty).toBe(false);
     });
 
     it('sets cameraDirty on cancel, leaves it false on normal completion', async () => {
@@ -204,7 +229,7 @@ describe('startHighQualityRender', () => {
         ctrlB.sceneLoaded = true;
         depsB.get_pixels = vi.fn(async () => {
             ctrlB.hqCancelled = true;
-            return new Uint8Array(4);
+            return new Uint8Array([0, 0, 0, 255]);
         });
         await ctrlB.startHighQualityRender();
         expect(ctrlB.cameraDirty).toBe(true);
