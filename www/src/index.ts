@@ -291,6 +291,11 @@ async function loadEnvironmentBytes(bytes: Uint8Array): Promise<void> {
     try {
         load_environment(bytes);
         setStatus('Environment loaded · click Render to apply IBL');
+        // Redraw the raster preview immediately so the background and IBL
+        // reflections appear without the user having to move the camera first.
+        // This also covers the boot-time race: the HDR loads after the first
+        // raster frame, so without this flag the stale no-env frame would linger.
+        ctrl.cameraDirty = true;
     } catch (err) {
         setStatus(`Environment error: ${err}`);
     }
@@ -392,6 +397,7 @@ function buildEnvDropdown(): void {
             unload_environment();
             ctrl.cancelHighQualityRender();
             setStatus('Using procedural sky');
+            ctrl.cameraDirty = true;  // Redraw immediately without the env map.
         } else {
             // Fetch a named built-in HDR from the assets directory.
             setStatus('Loading environment…');
