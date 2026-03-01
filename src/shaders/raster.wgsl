@@ -462,46 +462,44 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // not occluded by this baked term.
     let occlusion = sample_tex(mat.occlusion_texture, uv).r;
 
+    // Sample the env map once at the surface normal (used for both diffuse ambient
+    // and as the "rough limit" colour for specular ambient). Reusing it saves a
+    // texture lookup.
+    let env_N = ambient_color(N);
+
     // Diffuse ambient: Lambertian sky/env colour weighted by (1−metallic).
     // Metals have no diffuse response — their reflectance is all specular.
-    let diffuse_ambient = albedo * ambient_color(N) * (1.0 - metallic) * occlusion;
+    let diffuse_ambient = albedo * env_N * (1.0 - metallic) * occlusion;
 
-    // Specular ambient: env/sky colour in the reflection direction, scaled by
-    // the Karis 2013 analytical BRDF LUT approximation ("Real Shading in
-    // Unreal Engine 4", SIGGRAPH 2013).
+    // Specular ambient: Karis 2013 BRDF LUT amplitude × env colour,
+    // blended to approximate the GGX lobe spreading over rough surfaces.
     //
-    // Two problems arise without care:
+    // AMPLITUDE (Karis LUT): Raw Schlick Fresnel approaches 1.0 at grazing
+    // angles regardless of roughness, making every surface look chrome-plated.
+    // The LUT encodes ∫ f(l,v)·NdotL dl over the GGX lobe as (scale, bias):
+    //   specular = F0·scale + bias
+    // For rough surfaces, scale→0 and bias→0, correctly suppressing the
+    // specular. This is an analytical fit; no texture lookup required.
     //
-    // 1. AMPLITUDE: Raw Schlick Fresnel (F0 + (1−F0)·(1−NdotV)⁵) is badly wrong
-    //    for rough surfaces at grazing angles. Schlick approaches 1.0 regardless
-    //    of roughness when NdotV is small, so every surface becomes a near-perfect
-    //    mirror in IBL. A rough dielectric with roughness=0.8 at a 70° view angle
-    //    gets Schlick ≈ 0.20 — chrome-plated — even though F0 = 0.04. The Karis
-    //    BRDF LUT fixes this: for rough surfaces, scale→0 and bias→0, suppressing
-    //    the specular to near-zero at grazing angles.
-    //
-    // 2. COLOUR: Even with the correct amplitude, sampling the env map at the
-    //    exact mirror direction R gives a crisp, mirror-like reflection for every
-    //    roughness. A rough surface should see a blurry average over a wide lobe,
-    //    not a sharp point sample. The path tracer achieves this naturally by
-    //    scattering GGX rays; the rasterizer needs a prefiltered env map (different
-    //    mip levels per roughness) to do it properly. Without one, we approximate
-    //    by blending the sample direction from R (mirror, roughness=0) toward N
-    //    (hemisphere average, roughness=1). Using α = roughness² matches the GGX
-    //    lobe width convention and gives a smooth, visually pleasing transition.
-    //
-    // The LUT encodes ∫ f(l,v)·NdotL dl over the GGX lobe as a (scale, bias)
-    // pair: specular = F0 * scale + bias. This is an analytical fit; no texture.
+    // COLOUR (roughness-weighted blend): Even with the correct amplitude, a
+    // single env-map sample at the mirror direction R snaps to whatever vivid
+    // sky or ground colour happens to be in that direction, creating a chrome
+    // look on rough surfaces. The path tracer avoids this by averaging many GGX
+    // samples over the full lobe; without a prefiltered env map we approximate
+    // it by mixing between ambient_color(R) (sharp mirror, correct for
+    // roughness=0) and ambient_color(N) (the same smooth direction the diffuse
+    // term already uses, correct for roughness=1). The mix weight is
+    // (1−roughness)² so even moderate roughness (0.6) already leans 84% toward
+    // the soft N sample, killing the landscape-mirror appearance while keeping
+    // smooth/metallic surfaces properly reflective.
     let brdf_c0  = vec4<f32>(-1.0, -0.0275, -0.572,  0.022);
     let brdf_c1  = vec4<f32>( 1.0,  0.0425,  1.04,  -0.04);
     let brdf_r   = roughness * brdf_c0 + brdf_c1;
     let brdf_a   = min(brdf_r.x * brdf_r.x, exp2(-9.28 * n_dot_v)) * brdf_r.x + brdf_r.y;
     let brdf_ab  = vec2<f32>(-1.04, 1.04) * brdf_a + brdf_r.zw;
-    // Blend sample direction from R toward N as roughness increases,
-    // approximating the spreading of the GGX specular lobe without mip maps.
-    let rough_blend = roughness * roughness;
-    let sample_dir  = normalize(mix(R, N, rough_blend));
-    let specular_ambient = (f0 * brdf_ab.x + brdf_ab.y) * ambient_color(sample_dir) * occlusion;
+    let mirror_w     = (1.0 - roughness) * (1.0 - roughness);
+    let specular_env = mix(env_N, ambient_color(R), mirror_w);
+    let specular_ambient = (f0 * brdf_ab.x + brdf_ab.y) * specular_env * occlusion;
 
     let ambient = diffuse_ambient + specular_ambient;
 
