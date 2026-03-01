@@ -6,7 +6,7 @@ A physically-based path tracer that runs in the browser. The rendering engine is
 
 ## What it does
 
-Load a GLTF scene, orbit it with a turntable camera (drag to spin, scroll to zoom), then click **Render** for a high-quality path-traced still when you have the shot you want.
+Load a GLTF scene, orbit it with a turntable camera (drag to spin, scroll to zoom), adjust lighting with the Renderer tab (sun angle and intensity, IBL brightness, bounce depth, exposure), then click **Render** for a high-quality path-traced still when you have the shot you want.
 
 Two rendering modes, one scene:
 
@@ -92,8 +92,10 @@ The path tracer runs as a WebGPU compute shader (`trace.wgsl`). Each pixel accum
 - **Glass / transmission** — Fresnel-weighted refraction using Snell's law, with TIR (total internal reflection) handled correctly.
 - **Normal maps** — tangent-space normal maps applied via a tangent-space TBN matrix; UV-seam NaN guards prevent permanent pixel corruption.
 - **Image-based lighting (IBL)** — HDRI equirectangular environment maps used for both the path-tracer background and indirect light. Load a custom `.hdr` file or use the default.
-- **Next Event Estimation (NEE)** — the sun direction is sampled explicitly at each bounce, dramatically reducing variance on outdoor scenes.
+- **Multiple Importance Sampling (MIS)** — when an env map is loaded, each surface hit fires an explicit shadow ray toward an importance-sampled env direction *and* traces a BRDF-sampled scatter ray; the two contributions are combined with the power heuristic to minimise variance. The analytical sun is disabled in this mode (the env map already contains a physical light source).
+- **Next Event Estimation (NEE)** — when no env map is active, the analytical sun is sampled explicitly at each opaque surface hit, eliminating the firefly grain from small-solid-angle direct lighting.
 - **Progressive accumulation** — each call to `render()` adds one more sample per pixel. Samples are averaged and displayed with ACES filmic tonemapping.
+- **Exposure control** — applies `2^EV` scaling to the accumulated average before tone-mapping, so brightness can be adjusted live during a running render without discarding samples.
 - **Firefly suppression** — radiance is clamped per-sample before accumulation (threshold tuned to ACES saturation) to prevent single bright samples burning in permanently.
 
 ## Building
@@ -125,7 +127,7 @@ For environment lighting, load any equirectangular `.hdr` file via **Load HDR en
 
 ## Status
 
-91+ unit tests passing (`cargo test`).
+108+ unit tests passing (`cargo test`).
 
 ### Done
 
@@ -133,16 +135,17 @@ For environment lighting, load any equirectangular `.hdr` file via **Load HDR en
 - [x] BVH construction — median split on longest axis, flat pre-order layout
 - [x] Full PBR GGX path tracer — metallic/roughness BRDF, glass/transmission, normal maps, emissive
 - [x] IBL — HDRI environment maps with equirectangular sampling and firefly suppression
-- [x] NEE — analytical directional sun sampled explicitly at each bounce
+- [x] NEE — analytical directional sun sampled explicitly at each bounce (suppressed when env map active)
+- [x] MIS — power-heuristic combination of env importance sampling and BRDF sampling
 - [x] Progressive multi-sample accumulation with ACES filmic tonemapping
 - [x] Hardware rasterizer — 60 fps interactive preview with PBR approximation
 - [x] Turntable camera — drag-to-orbit, scroll-to-zoom (mouse wheel + touchpad pinch), auto-framing
 - [x] Drag-and-drop scene and environment loading
+- [x] Renderer controls — live sliders for max bounces, sun azimuth/elevation/intensity, IBL brightness, and exposure (EV)
 - [x] Portability — core builds as `cdylib` (WASM) and `rlib` (native tests)
 
 ### Planned
 
-- [ ] MIS (Multiple Importance Sampling) — balance BRDF and IBL sampling for faster convergence
 - [ ] Texture maps in rasterizer — currently uses solid base colour only in preview mode
 - [ ] Depth of field — thin-lens model with configurable aperture and focus distance
 - [ ] Emissive mesh lights — area lights from geometry; currently only IBL + sun

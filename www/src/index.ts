@@ -16,6 +16,12 @@ import init, {
     unload_environment,
     set_ibl_enabled,
     set_env_background,
+    set_max_bounces,
+    set_sun_azimuth,
+    set_sun_elevation,
+    set_sun_intensity,
+    set_ibl_scale,
+    set_exposure,
     update_camera,
     render,
     get_pixels,
@@ -51,6 +57,18 @@ const envSelect     = document.getElementById('env-select')     as HTMLSelectEle
 const sampleCount   = document.getElementById('sample-count')   as HTMLSelectElement;
 const fovSlider     = document.getElementById('fov-slider')     as HTMLInputElement;
 const fovValue      = document.getElementById('fov-value')!;
+const bouncesSlider  = document.getElementById('bounces-slider')   as HTMLInputElement;
+const bouncesValue   = document.getElementById('bounces-value')!;
+const exposureSlider = document.getElementById('exposure-slider')  as HTMLInputElement;
+const exposureValue  = document.getElementById('exposure-value')!;
+const sunAzSlider    = document.getElementById('sun-az-slider')    as HTMLInputElement;
+const sunAzValue     = document.getElementById('sun-az-value')!;
+const sunElSlider    = document.getElementById('sun-el-slider')    as HTMLInputElement;
+const sunElValue     = document.getElementById('sun-el-value')!;
+const sunIntSlider   = document.getElementById('sun-int-slider')   as HTMLInputElement;
+const sunIntValue    = document.getElementById('sun-int-value')!;
+const iblScaleSlider = document.getElementById('ibl-scale-slider') as HTMLInputElement;
+const iblScaleValue  = document.getElementById('ibl-scale-value')!;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Turntable camera
@@ -487,6 +505,82 @@ fovSlider.addEventListener('input', () => {
     fovValue.textContent = `${degrees}°`;
     ctrl.cancelHighQualityRender();
     applyTurntable();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Renderer controls — bounce count, exposure, sun, IBL
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Max-bounces slider. Higher = more accurate glass/indirect, slower render.
+ * Starts a new render because old samples (traced at a different depth) would
+ * blend incorrectly with new ones.
+ */
+bouncesSlider.addEventListener('input', () => {
+    const n = parseInt(bouncesSlider.value, 10);
+    bouncesValue.textContent = `${n}`;
+    set_max_bounces(n);
+    ctrl.cancelHighQualityRender();
+});
+
+/**
+ * Exposure slider. Applied as `linear × 2^EV` before ACES tone-mapping.
+ *
+ * Exposure is a display-time transform over the already-accumulated average,
+ * so it does NOT need to restart the render — the same samples look brighter
+ * or dimmer on the next `get_pixels` call. This makes it the only slider that
+ * works live during a running HQ render.
+ *
+ * The range element uses integer steps (−30…+30) to avoid float-step browser
+ * quirks; we divide by 10 to get −3.0…+3.0 EV.
+ */
+exposureSlider.addEventListener('input', () => {
+    const ev = parseInt(exposureSlider.value, 10) / 10;
+    exposureValue.textContent = `${ev >= 0 ? '+' : ''}${ev.toFixed(1)} EV`;
+    set_exposure(ev);
+    // Intentionally no cancelHighQualityRender() — exposure updates live.
+});
+
+/**
+ * Sun azimuth slider — horizontal compass direction (0–360°).
+ * Restarts any running HQ render because the lighting changes.
+ */
+sunAzSlider.addEventListener('input', () => {
+    const deg = parseInt(sunAzSlider.value, 10);
+    sunAzValue.textContent = `${deg}°`;
+    set_sun_azimuth(deg);
+    ctrl.cancelHighQualityRender();
+});
+
+/**
+ * Sun elevation slider — angle above the horizon (0 = horizon, 90 = zenith).
+ */
+sunElSlider.addEventListener('input', () => {
+    const deg = parseInt(sunElSlider.value, 10);
+    sunElValue.textContent = `${deg}°`;
+    set_sun_elevation(deg);
+    ctrl.cancelHighQualityRender();
+});
+
+/**
+ * Sun intensity slider. Integer steps ×10 → 0.0–5.0× multiplier.
+ */
+sunIntSlider.addEventListener('input', () => {
+    const scale = parseInt(sunIntSlider.value, 10) / 10;
+    sunIntValue.textContent = `${scale.toFixed(1)}×`;
+    set_sun_intensity(scale);
+    ctrl.cancelHighQualityRender();
+});
+
+/**
+ * IBL brightness slider. Scales env-map and sky contributions uniformly.
+ * Integer steps ×10 → 0.0–4.0× multiplier.
+ */
+iblScaleSlider.addEventListener('input', () => {
+    const scale = parseInt(iblScaleSlider.value, 10) / 10;
+    iblScaleValue.textContent = `${scale.toFixed(1)}×`;
+    set_ibl_scale(scale);
+    ctrl.cancelHighQualityRender();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

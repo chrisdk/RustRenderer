@@ -6,7 +6,7 @@
 //   3. At the hit point, evaluates emission, then stochastically chooses a
 //      scatter event (diffuse, GGX specular, or glass refraction) weighted
 //      by the surface BRDF and the Fresnel equations.
-//   4. Spawns the scattered ray and repeats up to MAX_BOUNCES times.
+//   4. Spawns the scattered ray and repeats up to frame.max_bounces times.
 //   5. Accumulates the result into a running-average float buffer.
 //
 // The quality improves with sample count: invoke with sample_index 0, 1, 2, …
@@ -37,7 +37,8 @@
 //   binding 7 : array<f32>         — env conditional CDFs (row-major, W entries/row)
 // Group 1 — per-frame data (updated every dispatch)
 //   binding 0 : Camera uniform     — camera position + pre-scaled basis
-//   binding 1 : FrameUniforms      — output width, height, sample index
+//   binding 1 : FrameUniforms      — dimensions, sample index, flags, env info,
+//                                    and user lighting controls (bounces, sun, IBL, exposure)
 //   binding 2 : array<u32>         — output RGBA8 pixels, row-major
 //   binding 3 : array<vec4<f32>>   — float accumulator, one vec4 per pixel
 
@@ -123,7 +124,7 @@ struct Camera {
     up_scaled:  vec3<f32>, _pad3: f32,
 }
 
-// Matches renderer::gpu::FrameUniforms (32 bytes).
+// Matches renderer::gpu::FrameUniforms (56 bytes).
 struct FrameUniforms {
     width:        u32,
     height:       u32,
@@ -142,6 +143,14 @@ struct FrameUniforms {
     // pdf_solid_angle(dir) = luminance(env_sample(dir)) * env_sample_weight.
     // Zero when no env map is loaded — disables env NEE and MIS in the shader.
     env_sample_weight: f32,
+
+    // ── User-adjustable lighting controls (offsets 32–55) ───────────────────
+    max_bounces:   u32,  // path length cap; preview mode overrides with PREVIEW_BOUNCES
+    sun_azimuth:   f32,  // radians: horizontal angle from +Z toward +X
+    sun_elevation: f32,  // radians: vertical angle above horizon
+    sun_intensity: f32,  // multiplier for SUN_RADIANCE in NEE; 0 = no sun
+    ibl_scale:     f32,  // multiplier for all env-map / sky contributions
+    exposure:      f32,  // EV stops: linear *= 2^exposure, applied before ACES
 }
 
 // ============================================================================
@@ -181,21 +190,13 @@ const PI:      f32 = 3.14159265358979323846;
 const TWO_PI:  f32 = 6.28318530717958647692;
 const INV_PI:  f32 = 0.31830988618379067154;
 
-// Maximum bounces in full-quality mode. 12 resolves most glass caustics and
-// multi-bounce interiors. More is diminishing returns for typical scenes.
-const MAX_BOUNCES: i32 = 12;
-
 // Bounce cap for preview/drag mode. 2 bounces = direct light + one reflection
 // or transmission. Cheap enough to stay interactive; still shows PBR materials.
+// Full-quality bounce count is now driven by frame.max_bounces (default 12).
 const PREVIEW_BOUNCES: i32 = 2;
 
 // After this bounce index, Russian roulette may terminate the path.
 const RR_START: i32 = 3;
-
-// Sun direction (normalised). Points up-and-slightly-left, like a mid-morning
-// sun in the northern hemisphere. Used by NEE to cast shadow rays.
-// normalize(vec3(0.4, 1.0, 0.3)) = vec3(0.3651, 0.9129, 0.1826)... approximately.
-const SUN_DIR: vec3<f32> = vec3<f32>(0.3651, 0.9129, 0.1826);
 
 // Sky colours at horizon and zenith, in linear light.
 //
@@ -854,9 +855,16 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
 }
 
 // Pack a linear-light HDR colour into a RGBA8 u32 for canvas output.
-// Applies ACES tone mapping then gamma 2.2 encoding.
+// Applies exposure compensation, ACES tone mapping, then gamma 2.2 encoding.
+//
+// Exposure is applied as linear *= 2^stops before tone-mapping, so +1 EV
+// doubles the brightness and −1 EV halves it. Because this runs on the
+// per-sample average (not on the raw accumulation buffer), changing exposure
+// mid-render doesn't invalidate accumulated samples — the next dispatch will
+// show the updated brightness without restarting.
 fn pack_rgba8(linear: vec3<f32>) -> u32 {
-    let mapped = aces(linear);
+    let exposed = linear * pow(2.0, frame.exposure);
+    let mapped  = aces(exposed);
     // sRGB gamma: a proper 2.2 power-law (close enough to the piecewise sRGB
     // curve; the difference is invisible at 8 bits per channel).
     let enc = pow(mapped, vec3(1.0 / 2.2));
@@ -909,16 +917,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // the current throughput and added to the running total.
     //
     // In preview mode (frame.flags bit 0) we cap the bounce count to 2 —
-    // primary ray + one indirect bounce. This is ~4-6× cheaper than 12
-    // bounces and still shows albedo, reflections, and basic lighting.
+    // primary ray + one indirect bounce. This is ~4-6× cheaper than the full
+    // bounce count and still shows albedo, reflections, and basic lighting.
+    // Otherwise we use frame.max_bounces, set by the user's slider (default 12).
     let preview_mode = (frame.flags & 1u) != 0u;
-    let max_bounces  = select(MAX_BOUNCES, PREVIEW_BOUNCES, preview_mode);
+    let max_bounces  = select(i32(frame.max_bounces), PREVIEW_BOUNCES, preview_mode);
 
     // MIS is active when an env map is loaded, IBL is enabled, AND we are not
     // in preview mode (preview prioritises speed over accuracy).
     let ibl_disabled = (frame.flags & 2u) != 0u;
     let do_mis = !preview_mode && frame.env_width > 0u && !ibl_disabled
               && frame.env_sample_weight > 0.0;
+
+    // Compute the sun direction from the user-controlled azimuth and elevation
+    // uniforms. Standard spherical-to-Cartesian with Y-up convention:
+    //   azimuth  = horizontal angle from +Z toward +X (like a compass bearing)
+    //   elevation = angle above the horizontal plane
+    // normalize() handles floating-point drift near the horizon or zenith.
+    let cos_el  = cos(frame.sun_elevation);
+    let sun_dir = normalize(vec3(
+        sin(frame.sun_azimuth)  * cos_el,   // X component
+        sin(frame.sun_elevation),            // Y component (height)
+        cos(frame.sun_azimuth)  * cos_el,   // Z component
+    ));
 
     var throughput = vec3(1.0);
     var radiance   = vec3(0.0);
@@ -956,9 +977,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // to the implicit path to avoid losing dark-region IBL.
                     let pdf_env = eval_env_pdf(ray_dir);
                     let w = select(1.0, power_heuristic(mis_brdf_pdf, pdf_env), pdf_env > 1e-8);
-                    radiance += throughput * env_rad * w;
+                    radiance += throughput * env_rad * w * frame.ibl_scale;
                 } else {
-                    radiance += throughput * env_rad;
+                    radiance += throughput * env_rad * frame.ibl_scale;
                 }
             } else {
                 // Dark studio grey: neutral but not pitch-black so silhouettes
@@ -1147,15 +1168,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // importance sampler handles it correctly. Running both simultaneously
             // double-counts the sun: metallic specular highlights get 2–3× too much
             // energy, spiking past the firefly clamp and producing persistent grain.
-            let n_dot_sun = dot(n, SUN_DIR);
+            let n_dot_sun = dot(n, sun_dir);
             if n_dot_sun > 0.0 && !do_mis {
                 let shadow_orig = hit_pos + n * T_MIN;
-                let shadow_inv  = vec3(1.0 / SUN_DIR.x, 1.0 / SUN_DIR.y, 1.0 / SUN_DIR.z);
-                let shadow_hit  = traverse_bvh(shadow_orig, SUN_DIR, shadow_inv);
+                let shadow_inv  = vec3(1.0 / sun_dir.x, 1.0 / sun_dir.y, 1.0 / sun_dir.z);
+                let shadow_hit  = traverse_bvh(shadow_orig, sun_dir, shadow_inv);
 
                 if shadow_hit.hit == 0u {
                     // Sun is unoccluded — evaluate diffuse + specular at the sun angle.
-                    let H_sun   = normalize(v_dir + SUN_DIR);
+                    let H_sun   = normalize(v_dir + sun_dir);
                     let v_dot_h = max(dot(v_dir, H_sun), 0.0001);
                     let n_dot_h = max(dot(n, H_sun), 0.0001);
 
@@ -1173,7 +1194,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                                      / max(4.0 * n_dot_v * n_dot_sun, 0.0001);
 
                     radiance += throughput * (diffuse_sun + specular_sun)
-                              * n_dot_sun * SUN_RADIANCE;
+                              * n_dot_sun * SUN_RADIANCE * frame.sun_intensity;
                 }
             }
 
@@ -1211,7 +1232,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let pdf_brdf     = eval_brdf_pdf(env_dir, n, v_dir, alpha, n_dot_v, p_spec);
                         let w_env        = power_heuristic(pdf_env, pdf_brdf);
                         let brdf_f       = eval_brdf_f(env_dir, n, v_dir, alpha, f0, albedo, metallic);
-                        radiance += throughput * brdf_f * env_radiance / pdf_env * w_env;
+                        radiance += throughput * brdf_f * env_radiance / pdf_env * w_env * frame.ibl_scale;
                     }
                 }
             }

@@ -45,9 +45,11 @@ use crate::scene::texture::Texture;
 // ============================================================================
 
 /// Per-frame shader constants: output dimensions, sample index, render flags,
-/// and environment map info.
+/// environment map info, and user-adjustable lighting controls.
 ///
-/// 32 bytes (two 16-byte rows), matching the WGSL `FrameUniforms` struct exactly.
+/// 56 bytes (one 32-byte block + one 24-byte extension), matching the WGSL
+/// `FrameUniforms` struct exactly. Every field is 4-byte aligned and there is
+/// no implicit padding — `bytemuck::Pod` is safe to derive.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct FrameUniforms {
@@ -77,6 +79,27 @@ pub struct FrameUniforms {
     /// the equirectangular env map equals `luminance(pixel) * env_sample_weight`.
     /// Set to 0.0 when no env map is loaded (disables MIS in the shader).
     pub env_sample_weight: f32,
+
+    // ── User-adjustable lighting controls (offsets 32–55) ───────────────────
+
+    /// Maximum path length in bounces (2–16). Clamped in `set_max_bounces`.
+    /// Preview mode overrides this with `PREVIEW_BOUNCES` regardless.
+    pub max_bounces:   u32,
+    /// Sun horizontal angle in radians (0 = +Z axis, increases toward +X).
+    /// Derived from the azimuth slider; the shader converts to a direction vector.
+    pub sun_azimuth:   f32,
+    /// Sun vertical angle above the horizon in radians (0 = horizon, π/2 = zenith).
+    pub sun_elevation: f32,
+    /// Multiplier for the analytical sun NEE radiance. 0.0 = invisible sun,
+    /// 1.0 = physical default, 5.0 = blazing noon. Does not affect IBL env maps.
+    pub sun_intensity: f32,
+    /// Linear multiplier for all env-map and sky contributions (background,
+    /// indirect IBL, env NEE). Does not affect emissive surfaces or the sun.
+    pub ibl_scale:     f32,
+    /// Exposure compensation in EV stops. Applied as `linear * 2^exposure`
+    /// before ACES tone-mapping — adjusts display brightness without touching
+    /// the accumulation buffer, so it works live during progressive rendering.
+    pub exposure:      f32,
 }
 
 // ============================================================================
@@ -139,6 +162,20 @@ pub struct Renderer {
     /// where you want IBL illumination without a distracting sky backdrop.
     /// Toggled by `set_env_background`. Mapped to `FrameUniforms::env_background`.
     pub env_background: bool,
+
+    // ── User-adjustable lighting controls ────────────────────────────────────
+    /// Maximum path bounces (2–16). Default 12. Clamped on write.
+    pub max_bounces:   u32,
+    /// Sun horizontal angle in **radians**. Default ≈ 63° (1.0996 rad).
+    pub sun_azimuth:   f32,
+    /// Sun vertical angle in **radians**. Default ≈ 66° (1.1519 rad).
+    pub sun_elevation: f32,
+    /// Multiplier for the analytical sun NEE radiance. Default 1.0.
+    pub sun_intensity: f32,
+    /// Linear multiplier for env-map / sky contributions. Default 1.0.
+    pub ibl_scale:     f32,
+    /// Display exposure in EV stops, applied before tone-mapping. Default 0.0.
+    pub exposure:      f32,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
@@ -245,6 +282,16 @@ impl Renderer {
             env_dims:                (0, 0),
             ibl_enabled:             true,
             env_background:          true,
+            // Lighting controls: defaults reproduce the old hardcoded shader values.
+            // Sun angles chosen to match the original SUN_DIR = (0.3651, 0.9129, 0.1826):
+            //   elevation = asin(0.9129) ≈ 65.6° → 66°
+            //   azimuth   = atan2(0.3651, 0.1826) / cos(66°) ≈ 63°
+            max_bounces:   12,
+            sun_azimuth:   63.0_f32.to_radians(),
+            sun_elevation: 66.0_f32.to_radians(),
+            sun_intensity: 1.0,
+            ibl_scale:     1.0,
+            exposure:      0.0,
             camera_buf:     None,
             frame_buf:      None,
             output_buf:     None,
@@ -698,6 +745,12 @@ impl Renderer {
             env_background:    u32::from(self.env_background),
             // Zero when no env is loaded — disables env NEE + MIS in the shader.
             env_sample_weight: self.env_sample_weight,
+            max_bounces:   self.max_bounces,
+            sun_azimuth:   self.sun_azimuth,
+            sun_elevation: self.sun_elevation,
+            sun_intensity: self.sun_intensity,
+            ibl_scale:     self.ibl_scale,
+            exposure:      self.exposure,
         };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
@@ -841,8 +894,8 @@ mod tests {
     /// an always-visible/invisible environment background.
     #[test]
     fn test_frame_uniforms_gpu_layout() {
-        assert_eq!(size_of::<FrameUniforms>(), 32,
-            "FrameUniforms must be 32 bytes (two 16-byte vec4 rows in WGSL)");
+        assert_eq!(size_of::<FrameUniforms>(), 56,
+            "FrameUniforms must be 56 bytes (32 original + 24 lighting controls)");
         assert_eq!(offset_of!(FrameUniforms, width),             0);
         assert_eq!(offset_of!(FrameUniforms, height),            4);
         assert_eq!(offset_of!(FrameUniforms, sample_index),      8);
@@ -851,6 +904,12 @@ mod tests {
         assert_eq!(offset_of!(FrameUniforms, env_height),        20);
         assert_eq!(offset_of!(FrameUniforms, env_background),    24);
         assert_eq!(offset_of!(FrameUniforms, env_sample_weight), 28);
+        assert_eq!(offset_of!(FrameUniforms, max_bounces),       32);
+        assert_eq!(offset_of!(FrameUniforms, sun_azimuth),       36);
+        assert_eq!(offset_of!(FrameUniforms, sun_elevation),     40);
+        assert_eq!(offset_of!(FrameUniforms, sun_intensity),     44);
+        assert_eq!(offset_of!(FrameUniforms, ibl_scale),         48);
+        assert_eq!(offset_of!(FrameUniforms, exposure),          52);
         // Verify Pod is satisfied (bytemuck requires no padding bytes and no
         // invalid bit patterns — both f32 and u32 are Pod, so this is fine).
         let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());
