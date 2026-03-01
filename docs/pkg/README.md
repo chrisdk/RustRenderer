@@ -81,7 +81,15 @@ During rendering each ray traverses the tree to find the nearest intersection in
 
 ### Interactive preview (rasterizer)
 
-While the user manipulates the camera a hardware rasterizer produces each frame using a standard vertex + fragment shader pipeline. It applies per-instance transforms and a Phong/PBR approximation with the same materials as the path tracer. Because the output goes directly to a GPU texture (no CPU readback), it stays at 60 fps regardless of scene complexity.
+While the user manipulates the camera a hardware rasterizer produces each frame using a standard vertex + fragment shader pipeline. The preview is now fully at parity with the path-tracer controls:
+
+- All four PBR texture maps applied per fragment — albedo (sRGB decoded), normal (TBN mapped), metallic/roughness, emissive, and ambient occlusion — with bilinear filtering to match the path tracer's texture quality.
+- GGX NDF specular + Schlick Fresnel for direct sun highlights.
+- Split-sum specular IBL: polished metals sample the HDR environment map at the reflection direction, weighted by Fresnel at the view-normal angle.
+- Sky background pass: a fullscreen triangle renders the HDR env map (or procedural sky gradient) behind all geometry without an extra render pass.
+- All UI controls live-update the preview — sun azimuth/elevation/intensity, IBL scale, exposure, IBL on/off, env-background on/off.
+
+Because the output goes directly to a GPU texture (no CPU readback), it stays at 60 fps regardless of scene complexity.
 
 ### Final render (path tracer)
 
@@ -127,7 +135,7 @@ For environment lighting, load any equirectangular `.hdr` file via **Load HDR en
 
 ## Status
 
-108+ unit tests passing (`cargo test`).
+113+ unit tests passing (`cargo test`), including naga-based WGSL validation and Rust↔WGSL struct layout cross-checks.
 
 ### Done
 
@@ -138,7 +146,7 @@ For environment lighting, load any equirectangular `.hdr` file via **Load HDR en
 - [x] NEE — analytical directional sun sampled explicitly at each bounce (suppressed when env map active)
 - [x] MIS — power-heuristic combination of env importance sampling and BRDF sampling
 - [x] Progressive multi-sample accumulation with ACES filmic tonemapping
-- [x] Hardware rasterizer — 60 fps interactive preview with PBR approximation
+- [x] Hardware rasterizer — 60 fps interactive preview, fully at parity with path-tracer controls: all four PBR texture maps (bilinear filtered), TBN normal mapping, GGX specular, specular IBL for metals, sky background pass, live sun/IBL/exposure controls
 - [x] Turntable camera — drag-to-orbit, scroll-to-zoom (mouse wheel + touchpad pinch), auto-framing
 - [x] Drag-and-drop scene and environment loading
 - [x] Renderer controls — live sliders for max bounces, sun azimuth/elevation/intensity, IBL brightness, and exposure (EV)
@@ -146,7 +154,6 @@ For environment lighting, load any equirectangular `.hdr` file via **Load HDR en
 
 ### Planned
 
-- [ ] Texture maps in rasterizer — currently uses solid base colour only in preview mode
 - [ ] Depth of field — thin-lens model with configurable aperture and focus distance
 - [ ] Emissive mesh lights — area lights from geometry; currently only IBL + sun
 

@@ -91,17 +91,18 @@ export function render(width: number, height: number, sample_index: number, prev
  * Controls whether the loaded environment map (or procedural sky) is rendered
  * as the visible background.
  *
- * When `visible` is `true` (the default), rays that escape the scene sample
- * the environment / sky as normal. When `false`, escaped rays contribute a
- * neutral dark grey instead — giving a "studio lighting" look where the env
- * map still illuminates the scene but is not visible as the background.
+ * When `visible` is `true` (the default), the sky/env map is drawn behind all
+ * geometry. In path-traced output, rays that escape the scene contribute the
+ * full env/sky radiance. In the rasteriser preview, a fullscreen sky pass
+ * renders the env map or procedural gradient before geometry is drawn.
  *
- * Affects path-traced output only. The rasteriser does not render background
- * sky pixels (they use the fixed clear colour); use `set_ibl_enabled` to
- * toggle whether the env map is used for ambient shading in the preview.
+ * When `false`, the background shows a neutral dark grey instead — a "studio
+ * lighting" look where the env map still illuminates the scene (via IBL) but
+ * is not visible as the backdrop. Both renderers respect this flag.
  *
- * Changes take effect on the next `render()` call. To avoid blending old and
- * new samples, start a fresh render by passing `sample_index = 0`.
+ * Path-tracer changes take effect on the next `render()` call; start a fresh
+ * render (`sample_index = 0`) to avoid blending old and new samples.
+ * Rasteriser changes take effect on the next `raster_frame()` call.
  */
 export function set_env_background(visible: boolean): void;
 
