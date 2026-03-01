@@ -361,15 +361,13 @@ fn ambient_color(N: vec3<f32>) -> vec3<f32> {
 }
 
 /// Samples the environment in direction `dir`, blurred by averaging 9 points
-/// in a 3×3 grid spread over a cone of half-angle `roughness * 2.0` radians.
+/// in a 3×3 grid spread over a cone of half-angle `roughness * 4.0` radians.
 ///
 /// The path tracer approximates the specular integral by averaging many GGX-
-/// sampled directions across the lobe. At roughness=0.3 the GGX lobe spans
-/// roughly 60–90° end-to-end; a single env-map sample at R reproduces a crisp
-/// mirror reflection even on medium-rough metallic surfaces. The 3×3 grid with
-/// a wide cone (34° half-angle at roughness=0.3) averages across sky, horizon
-/// and terrain, giving the soft, blurred reflection the path tracer achieves
-/// without needing a prefiltered env map.
+/// sampled directions across the lobe. At roughness=0.3 the GGX 99%-energy
+/// lobe half-angle is ~60°; a cone spread of ±69° (roughness × 4) covers most
+/// of that lobe, averaging across sky, horizon and terrain to give the soft,
+/// blurred reflection the path tracer achieves without a prefiltered env map.
 ///
 /// For near-mirrors (roughness < 0.05) returns a single sharp sample — blurring
 /// a delta-function lobe would be wrong. Falls back to sky_ambient when no HDR
@@ -386,7 +384,10 @@ fn blurred_specular_env(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
     let t1 = normalize(cross(up, dir));
     let t2 = cross(dir, t1);
     // Cardinal spread (axis-aligned) and diagonal spread (0.707 × axis).
-    let s  = roughness * 2.0;
+    // The GGX 99%-energy lobe half-angle is roughly 3× the half-power angle
+    // (atan(roughness)); at roughness=0.3 that's ~60°.  A ×4 multiplier gets
+    // us to ±69° which covers most of the lobe for roughness 0.2–0.4.
+    let s  = roughness * 4.0;
     let sd = s * 0.7071;
     // 3×3 grid: center + 4 cardinal + 4 diagonal = 9 samples.
     let avg = (c0
