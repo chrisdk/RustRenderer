@@ -176,4 +176,4 @@ Run `cargo test` before committing. If the test suite is broken, fix it before d
 Keep `README.md` up to date whenever features are added, changed, or removed. The README is the front door; if it describes a feature that no longer exists (or omits one that does), it misleads everyone who reads it. Update the Status section when a planned feature ships.
 
 ### Commits
-Write meaningful commit messages. The subject line should complete the sentence "This commit will…". Use the body to explain *why* the change was made, not just what files were touched. Keep subject lines under 72 characters.
+Write meaningful commit messages. The subject line should complete the sentence "This commit will…". Use the body to explain *why* the change was made, not just what files were touched. Keep subject lines under 72 characters. Omit the bit about being co-authored by Claude.

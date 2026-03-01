@@ -525,29 +525,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // For rough surfaces, scale→0 and bias→0, correctly suppressing the
     // specular. This is an analytical fit; no texture lookup required.
     //
-    // COLOUR — the rough fallback must NOT be sample_env(N):
-    //   Using sample_env(N) as the "rough" component is a matcap — it maps the
-    //   full-resolution HDR texture directly onto the surface via the normal
-    //   direction, making every metallic pixel show the exact landscape colour
-    //   at its N direction. Instead use sky_ambient(N), a smooth analytical
-    //   gradient (blue-sky → warm-ground), as the rough-surface fallback.
-    //   For smooth mirrors (mirror_w → 1) we blend toward blurred_specular_env(R)
-    //   which samples the real HDR around the reflection direction.
+    // COLOUR: always sample the env blurred around R (reflection direction),
+    // not around N (surface normal). Sampling at N would be a matcap — the HDR
+    // texture painted via normals. Sampling at R is a reflection, which is
+    // physically correct: smooth surfaces see a sharp reflection, rough surfaces
+    // see a heavily blurred (wide-cone average) that picks up the env's overall
+    // colour tones rather than a neutral grey sky gradient.
+    //
+    // blurred_specular_env() handles all cases: roughness=0 → single sharp
+    // sample; roughness=1 → 9-sample grid spread ±4 rad (averaging most of the
+    // sphere); no env loaded → falls back to sky_ambient() automatically.
     let brdf_c0  = vec4<f32>(-1.0, -0.0275, -0.572,  0.022);
     let brdf_c1  = vec4<f32>( 1.0,  0.0425,  1.04,  -0.04);
     let brdf_r   = roughness * brdf_c0 + brdf_c1;
     let brdf_a   = min(brdf_r.x * brdf_r.x, exp2(-9.28 * n_dot_v)) * brdf_r.x + brdf_r.y;
     let brdf_ab  = vec2<f32>(-1.04, 1.04) * brdf_a + brdf_r.zw;
-    // Smooth sky gradient as the rough-surface fallback: gives a physically
-    // plausible hemisphere average without the vivid HDR matcap artefact.
-    let spec_fallback = sky_ambient(N) * frame.ibl_scale;
-    // mirror_w falls to zero at roughness=0.5; rougher surfaces see only
-    // spec_fallback (no directional HDR reflection).
-    let mirror_w = pow(max(0.0, 1.0 - roughness * 2.0), 2.0);
-    var specular_env = spec_fallback;
-    if (mirror_w > 0.005) {
-        specular_env = mix(spec_fallback, blurred_specular_env(R, roughness), mirror_w);
-    }
+    let specular_env     = blurred_specular_env(R, roughness);
     let specular_ambient = (f0 * brdf_ab.x + brdf_ab.y) * specular_env * occlusion;
 
     let ambient = diffuse_ambient + specular_ambient;
