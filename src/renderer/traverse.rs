@@ -205,7 +205,6 @@ mod tests {
             instances:   vec![MeshInstance { mesh_index: 0, transform: identity_xform() }],
             materials:   vec![Material::default()],
             textures:    Vec::new(),
-            environment: None,
         };
         Bvh::build(&scene)
     }

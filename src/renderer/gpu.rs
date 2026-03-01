@@ -39,7 +39,6 @@ use crate::accel::bvh::Bvh;
 use crate::camera::CameraUniform;
 use crate::scene::material::Material;
 use crate::scene::texture::Texture;
-use super::GpuTexInfo;
 
 // ============================================================================
 // Supporting types
@@ -310,29 +309,9 @@ impl Renderer {
             },
         ));
 
-        // Pack all textures into a single flat storage buffer.
-        // Each pixel becomes one u32 with R in the low byte and A in the high
-        // byte, matching the order the WGSL shader unpacks them. A separate
-        // metadata buffer records where each texture starts in this flat array.
-        let mut tex_data: Vec<u32> = Vec::new();
-        let mut tex_info: Vec<GpuTexInfo> = Vec::new();
-
-        for texture in textures {
-            let offset = tex_data.len() as u32;
-            // Pack RGBA8 bytes → u32: [R, G, B, A] → R | G<<8 | B<<16 | A<<24.
-            // Using an explicit loop avoids bytemuck alignment requirements on
-            // the source Vec<u8> (whose backing store may only be 1-byte aligned).
-            tex_data.extend(texture.data.chunks_exact(4).map(|c| {
-                (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
-            }));
-            tex_info.push(GpuTexInfo {
-                offset, width: texture.width, height: texture.height, _pad: 0,
-            });
-        }
-
-        // WebGPU requires non-zero buffer sizes even when nothing uses them.
-        if tex_data.is_empty() { tex_data.push(0); }
-        if tex_info.is_empty() { tex_info.push(GpuTexInfo { offset: 0, width: 0, height: 0, _pad: 0 }); }
+        // Pack all textures into flat GPU storage buffers.
+        // See renderer::pack_textures for the encoding details and zero-size guard.
+        let (tex_data, tex_info) = super::pack_textures(textures);
 
         self.tex_data_buf = Some(self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {

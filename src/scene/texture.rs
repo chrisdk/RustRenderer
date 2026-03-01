@@ -99,10 +99,13 @@ fn to_rgba8(pixels: &[u8], format: Format, width: u32, height: u32) -> Vec<u8> {
             out
         }
 
-        // HDR floating-point formats (32-bit per channel) are used for
-        // environment maps and other high-dynamic-range content. These require
-        // special handling that isn't implemented yet, so we return a solid
-        // white placeholder for now.
+        // High-dynamic-range floating-point formats (R32F, R32G32B32F, etc.)
+        // can appear as inline material textures in some GLTF files.
+        // Note: environment maps follow a completely separate decode path
+        // (decode_hdr in environment.rs, called by the load_environment API)
+        // and never reach this function. This arm only fires for HDR textures
+        // embedded directly inside GLTF materials, which is rare in practice.
+        // Return a solid white placeholder until tone-mapping is added here.
         _ => vec![255u8; n * 4],
     }
 }

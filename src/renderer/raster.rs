@@ -33,8 +33,7 @@
 
 use crate::camera::RasterCameraUniform;
 use crate::scene::{geometry::Vertex, material::Material, Scene};
-use super::GpuTexInfo;
-// texture::Texture used implicitly via scene.textures — no direct import needed
+// GpuTexInfo and Texture used via super::pack_textures — no direct import needed
 
 // =============================================================================
 // Supporting types
@@ -77,7 +76,7 @@ struct DrawCall {
 /// The `device` and `queue` are borrowed from that renderer at each call site
 /// rather than stored here.
 pub struct RasterRenderer {
-    // ── Pipeline (built lazily on first render_frame) ────────────────────────
+    // ── Pipeline (built eagerly in upload_scene to surface shader errors early) ──
     bgl:      Option<wgpu::BindGroupLayout>,
     pipeline: Option<wgpu::RenderPipeline>,
 
@@ -207,20 +206,9 @@ impl RasterRenderer {
         ));
 
         // ── Texture buffers ──────────────────────────────────────────────────
-        // Pack all scene textures into a single flat RGBA8 storage buffer and
-        // a parallel metadata buffer. Identical packing to the path tracer so
-        // the WGSL sample_tex() function works the same way in both shaders.
-        let mut tex_data: Vec<u32>       = Vec::new();
-        let mut tex_info: Vec<GpuTexInfo> = Vec::new();
-        for texture in &scene.textures {
-            let offset = tex_data.len() as u32;
-            tex_data.extend(texture.data.chunks_exact(4).map(|c| {
-                (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
-            }));
-            tex_info.push(GpuTexInfo { offset, width: texture.width, height: texture.height, _pad: 0 });
-        }
-        if tex_data.is_empty() { tex_data.push(0); }
-        if tex_info.is_empty() { tex_info.push(GpuTexInfo { offset: 0, width: 0, height: 0, _pad: 0 }); }
+        // Pack all scene textures into flat GPU storage buffers using the same
+        // encoding as the path tracer so sample_tex() works identically in both shaders.
+        let (tex_data, tex_info) = super::pack_textures(&scene.textures);
 
         self.tex_data_buf = Some(device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {

@@ -490,7 +490,6 @@ mod tests {
             instances:   vec![instance],
             materials:   vec![Material::default()],
             textures:    Vec::new(),
-            environment: None,
         }
     }
 
@@ -546,7 +545,6 @@ mod tests {
             instances:   Vec::new(),
             materials:   Vec::new(),
             textures:    Vec::new(),
-            environment: None,
         };
         let bvh = Bvh::build(&scene);
         assert!(bvh.nodes.is_empty());
@@ -690,7 +688,6 @@ mod tests {
             materials: vec![Material::default()],
             vertices,
             textures:    Vec::new(),
-            environment: None,
         };
 
         let bvh = Bvh::build(&scene);
@@ -797,7 +794,6 @@ mod tests {
             ],
             materials:   vec![Material::default(); 8],
             textures:    Vec::new(),
-            environment: None,
         };
 
         let bvh = Bvh::build(&scene);
@@ -843,7 +839,6 @@ mod tests {
             ],
             materials:   vec![Material::default()],
             textures:    Vec::new(),
-            environment: None,
         };
 
         let bvh = Bvh::build(&scene);

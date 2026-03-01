@@ -24,8 +24,6 @@ use geometry::{Mesh, MeshInstance, Vertex};
 use material::Material;
 use texture::Texture;
 
-pub use environment::Environment;
-
 /// Everything the renderer needs to know about the scene.
 ///
 /// This struct owns all scene data: geometry, materials, textures, and the
@@ -58,10 +56,6 @@ pub struct Scene {
 
     /// All decoded textures referenced by materials in this scene.
     pub textures: Vec<Texture>,
-
-    /// Optional environment map providing background lighting. If None,
-    /// rays that escape the scene geometry hit a black background.
-    pub environment: Option<Environment>,
 }
 
 /// Errors that can occur while loading a scene.
@@ -289,7 +283,6 @@ impl Scene {
             instances,
             materials,
             textures,
-            environment: None,
         })
     }
 }

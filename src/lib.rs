@@ -182,8 +182,8 @@ pub fn load_environment(bytes: &[u8]) -> Result<(), JsValue> {
 /// neutral dark grey instead — giving a "studio lighting" look where the env
 /// map still illuminates the scene but is not visible as the background.
 ///
-/// Changes take effect on the next `render()` call; the accumulator is reset
-/// automatically so old and new samples are never blended together.
+/// Changes take effect on the next `render()` call. To avoid blending old and
+/// new samples, start a fresh render by passing `sample_index = 0`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn set_env_background(visible: bool) {
@@ -221,8 +221,8 @@ pub fn unload_environment() {
 /// if an env map is loaded — useful for A/B comparisons or artistic control.
 ///
 /// Has no effect on the rasteriser preview, which always uses its own
-/// procedural sky. Changes take effect on the next `render()` call; the
-/// accumulator is automatically reset so you see a clean result.
+/// procedural sky. Changes take effect on the next `render()` call. To avoid
+/// blending old and new samples, start a fresh render by passing `sample_index = 0`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn set_ibl_enabled(enabled: bool) {
