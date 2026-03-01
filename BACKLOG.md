@@ -8,7 +8,6 @@ and when items are completed (remove them and update README + CLAUDE.md).
 
 ## Interface Features
 
-- **Camera FOV slider** — expose the vertical field of view so the user can switch between telephoto (narrow) and wide-angle looks without editing code.
 - **Orbit pan mode** — hold Shift while dragging to translate the orbit target instead of rotating around it, so the user can reframe without zooming.
 - **Render region** — drag a rectangle on the canvas to path-trace only that region at full resolution; useful for examining a specific detail without a full-frame render.
 - **Scene info panel** — show triangle count, mesh count, material count, and canvas resolution after a scene loads. Helps users understand what they've loaded.

@@ -249,6 +249,61 @@
             background: #fff;
         }
 
+        /* ── Range sliders ──────────────────────────────────────────────────── */
+
+        /* Wrapper for a labelled slider: the header row shows the name on the
+           left and the live numeric value on the right. */
+        .slider-row {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .slider-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+        }
+        /* Flush the label top padding when it sits inside a slider-header. */
+        .slider-header .ctrl-label { padding-top: 0; }
+        .slider-value {
+            font-size: 11px;
+            color: rgba(255,255,255,0.45);
+            font-variant-numeric: tabular-nums;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            appearance: none;
+            -webkit-appearance: none;
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255,255,255,0.15);
+            outline: none;
+            cursor: pointer;
+        }
+        /* Webkit (Chrome, Safari, Edge) thumb */
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.70);
+            cursor: pointer;
+            transition: background 0.12s;
+        }
+        input[type="range"]::-webkit-slider-thumb:hover { background: #fff; }
+        /* Firefox thumb */
+        input[type="range"]::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.70);
+            cursor: pointer;
+            border: none;
+            transition: background 0.12s;
+        }
+        input[type="range"]::-moz-range-thumb:hover { background: #fff; }
+
         /* ── Secondary (ghost) button — Save PNG, Reset camera ─────────────── */
 
         .secondary-btn {
@@ -456,8 +511,16 @@
                     </select>
                 </div>
 
-                <!-- Camera tab: reset and output controls -->
+                <!-- Camera tab: FOV slider + reset -->
                 <div class="tab-pane" id="tab-camera">
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Field of view</span>
+                            <span class="slider-value" id="fov-value">60°</span>
+                        </div>
+                        <!-- Range: 20° (telephoto) to 110° (wide-angle). Default 60°. -->
+                        <input id="fov-slider" type="range" min="20" max="110" value="60" step="1">
+                    </div>
                     <div class="ctrl-label">View</div>
                     <button id="reset-cam-btn" class="secondary-btn" disabled>Reset camera</button>
                 </div>

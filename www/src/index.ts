@@ -49,6 +49,8 @@ const sceneSelect   = document.getElementById('scene-select')   as HTMLSelectEle
 const sceneAttrib   = document.getElementById('scene-attribution')!;
 const envSelect     = document.getElementById('env-select')     as HTMLSelectElement;
 const sampleCount   = document.getElementById('sample-count')   as HTMLSelectElement;
+const fovSlider     = document.getElementById('fov-slider')     as HTMLInputElement;
+const fovValue      = document.getElementById('fov-value')!;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Turntable camera
@@ -56,7 +58,7 @@ const sampleCount   = document.getElementById('sample-count')   as HTMLSelectEle
 
 const turntable = new Turntable();
 
-const VFOV       = Math.PI / 3;   // 60° vertical field of view
+let   vfov       = Math.PI / 3;   // vertical field of view in radians; mutable — driven by the FOV slider
 const DRAG_SPEED = 0.005;         // radians of rotation per pixel dragged
 const ZOOM_SPEED = 0.002;         // exponential zoom rate per scroll pixel
 
@@ -72,7 +74,7 @@ function applyTurntable(): void {
     const { px, py, pz, yaw, pitch } = turntable.toCameraParams();
     const w = canvas.width  || 1;
     const h = canvas.height || 1;
-    update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
+    update_camera(px, py, pz, yaw, pitch, vfov, w / h);
     ctrl.cameraDirty = true;
 }
 
@@ -93,7 +95,7 @@ const ctrl = new RenderController({
     setStatus,
     onSceneLoaded: (bounds) => {
         lastBounds = bounds;
-        turntable.autoFrame(bounds, VFOV);
+        turntable.autoFrame(bounds, vfov);
         applyTurntable();
         renderBtn.disabled   = false;
         saveBtn.disabled     = false;
@@ -104,7 +106,7 @@ const ctrl = new RenderController({
         // Lock the viewpoint for the full HQ render. Does NOT set cameraDirty
         // so a raster frame isn't triggered on top of the path-traced output.
         const { px, py, pz, yaw, pitch } = turntable.toCameraParams();
-        update_camera(px, py, pz, yaw, pitch, VFOV, w / h);
+        update_camera(px, py, pz, yaw, pitch, vfov, w / h);
     },
     onHqStart: () => {
         renderBtn.textContent = 'Cancel';
@@ -462,6 +464,32 @@ sampleCount.addEventListener('change', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FOV slider
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Live-updates the vertical field of view as the slider moves.
+ *
+ * The FOV only affects the camera projection — no GPU scene data changes, so
+ * no re-upload is needed. `applyTurntable()` calls `update_camera()` with the
+ * new angle; the rasterizer redraws immediately. Any in-progress HQ render is
+ * cancelled because old samples were traced with the old FOV and would blend
+ * incorrectly with new ones.
+ *
+ * Note: the slider changes the view angle but does NOT auto-reframe the camera
+ * — the turntable position stays fixed so the change looks like a lens swap
+ * rather than a sudden jump. The next camera reset (F or "Reset camera") will
+ * auto-frame using the new FOV.
+ */
+fovSlider.addEventListener('input', () => {
+    const degrees = parseInt(fovSlider.value, 10);
+    vfov = degrees * Math.PI / 180;
+    fovValue.textContent = `${degrees}°`;
+    ctrl.cancelHighQualityRender();
+    applyTurntable();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Save PNG
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -500,7 +528,7 @@ saveBtn.addEventListener('click', savePng);
 function resetCamera(): void {
     if (!lastBounds) return;
     ctrl.cancelHighQualityRender();
-    turntable.autoFrame(lastBounds, VFOV);
+    turntable.autoFrame(lastBounds, vfov);
     applyTurntable();
 }
 
