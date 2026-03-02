@@ -124,7 +124,7 @@ struct Camera {
     up_scaled:  vec3<f32>, _pad3: f32,
 }
 
-// Matches renderer::gpu::FrameUniforms (56 bytes).
+// Matches renderer::gpu::FrameUniforms (64 bytes).
 struct FrameUniforms {
     width:        u32,
     height:       u32,
@@ -151,6 +151,10 @@ struct FrameUniforms {
     sun_intensity: f32,  // multiplier for SUN_RADIANCE in NEE; 0 = no sun
     ibl_scale:     f32,  // multiplier for all env-map / sky contributions
     exposure:      f32,  // EV stops: linear *= 2^exposure, applied before ACES
+
+    // ── Depth of field (offsets 56–63) ───────────────────────────────────────
+    aperture:   f32,  // thin-lens radius in world units; 0 = pinhole (no DoF)
+    focus_dist: f32,  // focal plane distance in world units
 }
 
 // ============================================================================
@@ -898,12 +902,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let u = (f32(px) + 0.5 + jx) / f32(w);
     let v = (f32(py) + 0.5 + jy) / f32(h);
 
-    var ray_orig = camera.position;
-    var ray_dir  = normalize(
+    // Pinhole ray direction from pixel UV.
+    let pinhole_dir = normalize(
         camera.fwd
         + (2.0 * u - 1.0) * camera.rgt_scaled
         + (1.0 - 2.0 * v) * camera.up_scaled,
     );
+
+    // ── Thin-lens depth of field ──────────────────────────────────────────────
+    // When aperture == 0 (default) this is a pinhole camera — every point in
+    // the scene is in focus. With aperture > 0 we model a thin lens:
+    //   1. The pinhole ray defines the focus point on the focal plane.
+    //   2. The ray origin is jittered uniformly across a disc of radius
+    //      `aperture` in the camera's image plane.
+    //   3. The new direction converges at the same focus point, so geometry
+    //      exactly on the focal plane stays sharp while everything else blurs
+    //      into a circle of confusion proportional to its depth offset.
+    //
+    // `rgt_scaled` and `up_scaled` are scaled FOV basis vectors; normalising
+    // them gives unit right/up vectors in world space for the lens disc.
+    var ray_orig = camera.position;
+    var ray_dir  = pinhole_dir;
+    if frame.aperture > 0.0 {
+        let focus_pt   = camera.position + pinhole_dir * frame.focus_dist;
+        let lens_r     = frame.aperture * sqrt(rand_f32(&seed));
+        let lens_theta = TWO_PI * rand_f32(&seed);
+        let cam_right  = normalize(camera.rgt_scaled);
+        let cam_up     = normalize(camera.up_scaled);
+        ray_orig = camera.position
+            + lens_r * (cos(lens_theta) * cam_right + sin(lens_theta) * cam_up);
+        ray_dir  = normalize(focus_pt - ray_orig);
+    }
 
     // ── Path tracing loop ─────────────────────────────────────────────────────
     //

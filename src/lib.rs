@@ -383,6 +383,40 @@ pub fn set_exposure(stops: f32) {
     });
 }
 
+/// Sets the thin-lens aperture radius in world units.
+///
+/// `0.0` (the default) gives a pinhole camera where everything is in focus.
+/// Larger values widen the circle of confusion for geometry that is not on
+/// the focal plane, producing cinematic bokeh. Changes take effect on the
+/// next `render()` call with `sample_index = 0` (a fresh accumulation).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_aperture(radius: f32) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.aperture = radius.max(0.0);
+            log::debug!("aperture → {radius:.4}");
+        }
+    });
+}
+
+/// Sets the focal plane distance in world units.
+///
+/// Geometry exactly this far from the camera appears sharp; everything closer
+/// or farther blurs according to the aperture setting. Only meaningful when
+/// `set_aperture` has been called with a value greater than zero. Changes take
+/// effect on the next `render()` call with `sample_index = 0`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_focus_distance(dist: f32) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.focus_dist = dist.max(0.01);
+            log::debug!("focus_dist → {dist:.3}");
+        }
+    });
+}
+
 /// Returns the world-space axis-aligned bounding box of the loaded scene as a
 /// `Float32Array` of six values: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
 ///

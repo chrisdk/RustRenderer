@@ -607,7 +607,7 @@
                     </div>
                 </div>
 
-                <!-- Camera tab: FOV slider + reset -->
+                <!-- Camera tab: FOV slider + depth of field + reset -->
                 <div class="tab-pane" id="tab-camera">
                     <div class="slider-row">
                         <div class="slider-header">
@@ -617,7 +617,29 @@
                         <!-- Range: 20° (telephoto) to 110° (wide-angle). Default 60°. -->
                         <input id="fov-slider" type="range" min="20" max="110" value="60" step="1">
                     </div>
-                    <div class="ctrl-label">View</div>
+
+                    <div class="ctrl-label" style="margin-top: 8px">Depth of field</div>
+
+                    <!-- Aperture: integer steps 0–100, displayed as /1000 → 0.000–0.100 world units.
+                         0 = pinhole (no blur). Increase to add bokeh. -->
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Aperture</span>
+                            <span class="slider-value" id="aperture-value">0.000</span>
+                        </div>
+                        <input id="aperture-slider" type="range" min="0" max="100" value="0" step="1">
+                    </div>
+
+                    <!-- Focus distance: integer steps 5–300, displayed as /10 → 0.5–30.0 world units. -->
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Focus distance</span>
+                            <span class="slider-value" id="focus-dist-value">5.0</span>
+                        </div>
+                        <input id="focus-dist-slider" type="range" min="5" max="300" value="50" step="1">
+                    </div>
+
+                    <div class="ctrl-label" style="margin-top: 8px">View</div>
                     <button id="reset-cam-btn" class="secondary-btn" disabled>Reset camera</button>
                 </div>
             </div>

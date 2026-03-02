@@ -8,7 +8,7 @@
  *   4. Preview: update_camera → raster_frame → raster_get_pixels (60 fps rasterizer).
  *   5. HQ render: update_camera → render → get_pixels → putImageData (path tracer).
  */
-import init, { init_renderer, load_scene, load_environment, unload_environment, set_ibl_enabled, set_env_background, set_max_bounces, set_sun_azimuth, set_sun_elevation, set_sun_intensity, set_ibl_scale, set_exposure, update_camera, render, get_pixels, raster_frame, raster_get_pixels, get_scene_bounds, get_scene_stats, } from '../pkg/render.js';
+import init, { init_renderer, load_scene, load_environment, unload_environment, set_ibl_enabled, set_env_background, set_max_bounces, set_sun_azimuth, set_sun_elevation, set_sun_intensity, set_ibl_scale, set_exposure, set_aperture, set_focus_distance, update_camera, render, get_pixels, raster_frame, raster_get_pixels, get_scene_bounds, get_scene_stats, } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
 import { Turntable } from './turntable.js';
 import { RenderController } from './render-controller.js';
@@ -42,6 +42,10 @@ const envSelect = document.getElementById('env-select');
 const sampleCount = document.getElementById('sample-count');
 const fovSlider = document.getElementById('fov-slider');
 const fovValue = document.getElementById('fov-value');
+const apertureSlider = document.getElementById('aperture-slider');
+const apertureValue = document.getElementById('aperture-value');
+const focusDistSlider = document.getElementById('focus-dist-slider');
+const focusDistValue = document.getElementById('focus-dist-value');
 const bouncesSlider = document.getElementById('bounces-slider');
 const bouncesValue = document.getElementById('bounces-value');
 const exposureSlider = document.getElementById('exposure-slider');
@@ -461,6 +465,22 @@ fovSlider.addEventListener('input', () => {
     fovValue.textContent = `${degrees}°`;
     ctrl.cancelHighQualityRender();
     applyTurntable();
+});
+/** Aperture slider. Integer steps 0–100 → 0.000–0.100 world-unit lens radius.
+ *  At 0 the shader skips the lens jitter entirely (pinhole, no DoF). */
+apertureSlider.addEventListener('input', () => {
+    const radius = parseInt(apertureSlider.value, 10) / 1000;
+    apertureValue.textContent = radius.toFixed(3);
+    set_aperture(radius);
+    scheduleRenderRestart();
+});
+/** Focus distance slider. Integer steps 5–300 → 0.5–30.0 world units.
+ *  The focal plane lives at this distance from the camera; everything else blurs. */
+focusDistSlider.addEventListener('input', () => {
+    const dist = parseInt(focusDistSlider.value, 10) / 10;
+    focusDistValue.textContent = dist.toFixed(1);
+    set_focus_distance(dist);
+    scheduleRenderRestart();
 });
 // ─────────────────────────────────────────────────────────────────────────────
 // Renderer controls — bounce count, exposure, sun, IBL

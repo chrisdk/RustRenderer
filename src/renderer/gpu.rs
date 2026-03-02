@@ -100,6 +100,15 @@ pub struct FrameUniforms {
     /// before ACES tone-mapping — adjusts display brightness without touching
     /// the accumulation buffer, so it works live during progressive rendering.
     pub exposure:      f32,
+
+    // ── Depth of field (offsets 56–63) ───────────────────────────────────────
+
+    /// Thin-lens aperture radius in world units. `0.0` = pinhole (no DoF).
+    /// Larger values widen the circle of confusion for out-of-focus geometry.
+    pub aperture:      f32,
+    /// Distance from the camera to the plane of perfect focus, in world units.
+    /// Only meaningful when `aperture > 0`. Rays converge at this depth.
+    pub focus_dist:    f32,
 }
 
 // ============================================================================
@@ -176,6 +185,10 @@ pub struct Renderer {
     pub ibl_scale:     f32,
     /// Display exposure in EV stops, applied before tone-mapping. Default 0.0.
     pub exposure:      f32,
+    /// Thin-lens aperture radius in world units. 0.0 = pinhole (no DoF).
+    pub aperture:      f32,
+    /// Focal plane distance in world units. Only used when aperture > 0.
+    pub focus_dist:    f32,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
@@ -304,6 +317,8 @@ impl Renderer {
             sun_intensity: 1.0,
             ibl_scale:     1.0,
             exposure:      0.0,
+            aperture:      0.0,   // pinhole — no DoF by default
+            focus_dist:    5.0,   // 5 world units; overwritten by the UI slider
             camera_buf:     None,
             frame_buf:      None,
             output_buf:     None,
@@ -782,6 +797,8 @@ impl Renderer {
             sun_intensity: self.sun_intensity,
             ibl_scale:     self.ibl_scale,
             exposure:      self.exposure,
+            aperture:      self.aperture,
+            focus_dist:    self.focus_dist,
         };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
@@ -925,8 +942,8 @@ mod tests {
     /// an always-visible/invisible environment background.
     #[test]
     fn test_frame_uniforms_gpu_layout() {
-        assert_eq!(size_of::<FrameUniforms>(), 56,
-            "FrameUniforms must be 56 bytes (32 original + 24 lighting controls)");
+        assert_eq!(size_of::<FrameUniforms>(), 64,
+            "FrameUniforms must be 64 bytes (56 existing + 8 for aperture + focus_dist)");
         assert_eq!(offset_of!(FrameUniforms, width),             0);
         assert_eq!(offset_of!(FrameUniforms, height),            4);
         assert_eq!(offset_of!(FrameUniforms, sample_index),      8);
@@ -941,6 +958,8 @@ mod tests {
         assert_eq!(offset_of!(FrameUniforms, sun_intensity),     44);
         assert_eq!(offset_of!(FrameUniforms, ibl_scale),         48);
         assert_eq!(offset_of!(FrameUniforms, exposure),          52);
+        assert_eq!(offset_of!(FrameUniforms, aperture),          56);
+        assert_eq!(offset_of!(FrameUniforms, focus_dist),        60);
         // Verify Pod is satisfied (bytemuck requires no padding bytes and no
         // invalid bit patterns — both f32 and u32 are Pod, so this is fine).
         let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());

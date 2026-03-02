@@ -148,6 +148,19 @@ export function render(width, height, sample_index, preview) {
 }
 
 /**
+ * Sets the thin-lens aperture radius in world units.
+ *
+ * `0.0` (the default) gives a pinhole camera where everything is in focus.
+ * Larger values widen the circle of confusion for geometry that is not on
+ * the focal plane, producing cinematic bokeh. Changes take effect on the
+ * next `render()` call with `sample_index = 0` (a fresh accumulation).
+ * @param {number} radius
+ */
+export function set_aperture(radius) {
+    wasm.set_aperture(radius);
+}
+
+/**
  * Controls whether the loaded environment map (or procedural sky) is rendered
  * as the visible background.
  *
@@ -184,6 +197,19 @@ export function set_env_background(visible) {
  */
 export function set_exposure(stops) {
     wasm.set_exposure(stops);
+}
+
+/**
+ * Sets the focal plane distance in world units.
+ *
+ * Geometry exactly this far from the camera appears sharp; everything closer
+ * or farther blurs according to the aperture setting. Only meaningful when
+ * `set_aperture` has been called with a value greater than zero. Changes take
+ * effect on the next `render()` call with `sample_index = 0`.
+ * @param {number} dist
+ */
+export function set_focus_distance(dist) {
+    wasm.set_focus_distance(dist);
 }
 
 /**
@@ -1143,12 +1169,12 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 491, function: Function { arguments: [Externref], shim_idx: 492, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 490, function: Function { arguments: [Externref], shim_idx: 491, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7, wasm_bindgen__convert__closures_____invoke__h3d555e81212e6f69);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 497, function: Function { arguments: [Externref], shim_idx: 498, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 496, function: Function { arguments: [Externref], shim_idx: 497, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__he5ef96efaea0f49b, wasm_bindgen__convert__closures_____invoke__h6b539ed7f51515d5);
             return ret;
         },

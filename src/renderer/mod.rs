@@ -379,5 +379,7 @@ mod shader_tests {
         assert_eq!(field_offset(m, "sun_intensity"),     offset_of!(FrameUniforms, sun_intensity)     as u32);
         assert_eq!(field_offset(m, "ibl_scale"),         offset_of!(FrameUniforms, ibl_scale)         as u32);
         assert_eq!(field_offset(m, "exposure"),          offset_of!(FrameUniforms, exposure)          as u32);
+        assert_eq!(field_offset(m, "aperture"),          offset_of!(FrameUniforms, aperture)          as u32);
+        assert_eq!(field_offset(m, "focus_dist"),        offset_of!(FrameUniforms, focus_dist)        as u32);
     }
 }

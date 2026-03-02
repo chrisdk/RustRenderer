@@ -22,6 +22,8 @@ import init, {
     set_sun_intensity,
     set_ibl_scale,
     set_exposure,
+    set_aperture,
+    set_focus_distance,
     update_camera,
     render,
     get_pixels,
@@ -63,8 +65,12 @@ const sceneSelect   = document.getElementById('scene-select')   as HTMLSelectEle
 const sceneAttrib   = document.getElementById('scene-attribution')!;
 const envSelect     = document.getElementById('env-select')     as HTMLSelectElement;
 const sampleCount   = document.getElementById('sample-count')   as HTMLSelectElement;
-const fovSlider     = document.getElementById('fov-slider')     as HTMLInputElement;
-const fovValue      = document.getElementById('fov-value')!;
+const fovSlider       = document.getElementById('fov-slider')       as HTMLInputElement;
+const fovValue        = document.getElementById('fov-value')!;
+const apertureSlider  = document.getElementById('aperture-slider')  as HTMLInputElement;
+const apertureValue   = document.getElementById('aperture-value')!;
+const focusDistSlider = document.getElementById('focus-dist-slider') as HTMLInputElement;
+const focusDistValue  = document.getElementById('focus-dist-value')!;
 const bouncesSlider  = document.getElementById('bounces-slider')   as HTMLInputElement;
 const bouncesValue   = document.getElementById('bounces-value')!;
 const exposureSlider = document.getElementById('exposure-slider')  as HTMLInputElement;
@@ -529,6 +535,24 @@ fovSlider.addEventListener('input', () => {
     fovValue.textContent = `${degrees}°`;
     ctrl.cancelHighQualityRender();
     applyTurntable();
+});
+
+/** Aperture slider. Integer steps 0–100 → 0.000–0.100 world-unit lens radius.
+ *  At 0 the shader skips the lens jitter entirely (pinhole, no DoF). */
+apertureSlider.addEventListener('input', () => {
+    const radius = parseInt(apertureSlider.value, 10) / 1000;
+    apertureValue.textContent = radius.toFixed(3);
+    set_aperture(radius);
+    scheduleRenderRestart();
+});
+
+/** Focus distance slider. Integer steps 5–300 → 0.5–30.0 world units.
+ *  The focal plane lives at this distance from the camera; everything else blurs. */
+focusDistSlider.addEventListener('input', () => {
+    const dist = parseInt(focusDistSlider.value, 10) / 10;
+    focusDistValue.textContent = dist.toFixed(1);
+    set_focus_distance(dist);
+    scheduleRenderRestart();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

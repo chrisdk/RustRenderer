@@ -99,6 +99,16 @@ export function raster_get_pixels(width: number, height: number): Promise<Uint8A
 export function render(width: number, height: number, sample_index: number, preview: boolean): void;
 
 /**
+ * Sets the thin-lens aperture radius in world units.
+ *
+ * `0.0` (the default) gives a pinhole camera where everything is in focus.
+ * Larger values widen the circle of confusion for geometry that is not on
+ * the focal plane, producing cinematic bokeh. Changes take effect on the
+ * next `render()` call with `sample_index = 0` (a fresh accumulation).
+ */
+export function set_aperture(radius: number): void;
+
+/**
  * Controls whether the loaded environment map (or procedural sky) is rendered
  * as the visible background.
  *
@@ -130,6 +140,16 @@ export function set_env_background(visible: boolean): void;
  * +1 EV = twice as bright; −1 EV = half as bright. Typical range: −3 to +3.
  */
 export function set_exposure(stops: number): void;
+
+/**
+ * Sets the focal plane distance in world units.
+ *
+ * Geometry exactly this far from the camera appears sharp; everything closer
+ * or farther blurs according to the aperture setting. Only meaningful when
+ * `set_aperture` has been called with a value greater than zero. Changes take
+ * effect on the next `render()` call with `sample_index = 0`.
+ */
+export function set_focus_distance(dist: number): void;
 
 /**
  * Enables or disables Image-Based Lighting.
@@ -251,8 +271,10 @@ export interface InitOutput {
     readonly raster_frame: (a: number, b: number) => void;
     readonly raster_get_pixels: (a: number, b: number) => any;
     readonly render: (a: number, b: number, c: number, d: number) => void;
+    readonly set_aperture: (a: number) => void;
     readonly set_env_background: (a: number) => void;
     readonly set_exposure: (a: number) => void;
+    readonly set_focus_distance: (a: number) => void;
     readonly set_ibl_enabled: (a: number) => void;
     readonly set_ibl_scale: (a: number) => void;
     readonly set_max_bounces: (a: number) => void;
