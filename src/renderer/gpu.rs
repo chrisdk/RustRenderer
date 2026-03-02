@@ -109,6 +109,26 @@ pub struct FrameUniforms {
     /// Distance from the camera to the plane of perfect focus, in world units.
     /// Only meaningful when `aperture > 0`. Rays converge at this depth.
     pub focus_dist:    f32,
+
+    // ── Post-processing (offsets 64–75) ──────────────────────────────────────
+
+    /// Chromatic aberration strength. `0.0` = disabled (no fringing).
+    /// Higher values push the red channel outward and blue inward from the
+    /// image centre, mimicking the radial colour fringing of cheap lenses.
+    /// Good range: 0.0–3.0. Applied after accumulation, before tone-mapping.
+    pub ca_strength:   f32,
+    /// Vignette strength. `0.0` = no darkening; `1.0` = corners fully black.
+    /// Applied in linear light (before tone-mapping) so it interacts correctly
+    /// with the ACES curve and doesn't crush mid-tones in the centre.
+    pub vignette:      f32,
+    /// Film grain intensity. `0.0` = no grain; `1.0` ≈ heavy grain.
+    /// Applied *after* gamma encoding so the noise is perceptually uniform
+    /// (equal noise in shadows and highlights, like physical film grain).
+    /// Seeded from pixel position + sample index so each new sample shifts
+    /// the pattern — grain never becomes a fixed-pixel artifact.
+    pub grain:         f32,
+    /// Pad to a multiple of 16 bytes for WebGPU uniform buffer alignment.
+    pub _pad_post:     f32,
 }
 
 // ============================================================================
@@ -189,6 +209,12 @@ pub struct Renderer {
     pub aperture:      f32,
     /// Focal plane distance in world units. Only used when aperture > 0.
     pub focus_dist:    f32,
+    /// Chromatic aberration strength. 0.0 = disabled.
+    pub ca_strength:   f32,
+    /// Vignette strength. 0.0 = no darkening, 1.0 = corners fully black.
+    pub vignette:      f32,
+    /// Film grain intensity. 0.0 = no grain.
+    pub grain:         f32,
 
     // ── Per-frame data (updated before each dispatch) ────────────────────────
     /// Camera parameters. `@group(1) @binding(0)`.
@@ -319,6 +345,9 @@ impl Renderer {
             exposure:      0.0,
             aperture:      0.0,   // pinhole — no DoF by default
             focus_dist:    5.0,   // 5 world units; overwritten by the UI slider
+            ca_strength:   0.0,   // no chromatic aberration
+            vignette:      0.0,   // no vignette
+            grain:         0.0,   // no film grain
             camera_buf:     None,
             frame_buf:      None,
             output_buf:     None,
@@ -799,6 +828,10 @@ impl Renderer {
             exposure:      self.exposure,
             aperture:      self.aperture,
             focus_dist:    self.focus_dist,
+            ca_strength:   self.ca_strength,
+            vignette:      self.vignette,
+            grain:         self.grain,
+            _pad_post:     0.0,
         };
         match &self.frame_buf {
             Some(buf) => self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&frame_data)),
@@ -942,8 +975,8 @@ mod tests {
     /// an always-visible/invisible environment background.
     #[test]
     fn test_frame_uniforms_gpu_layout() {
-        assert_eq!(size_of::<FrameUniforms>(), 64,
-            "FrameUniforms must be 64 bytes (56 existing + 8 for aperture + focus_dist)");
+        assert_eq!(size_of::<FrameUniforms>(), 80,
+            "FrameUniforms must be 80 bytes (64 + 12 for CA/vignette/grain + 4 pad)");
         assert_eq!(offset_of!(FrameUniforms, width),             0);
         assert_eq!(offset_of!(FrameUniforms, height),            4);
         assert_eq!(offset_of!(FrameUniforms, sample_index),      8);
@@ -960,6 +993,9 @@ mod tests {
         assert_eq!(offset_of!(FrameUniforms, exposure),          52);
         assert_eq!(offset_of!(FrameUniforms, aperture),          56);
         assert_eq!(offset_of!(FrameUniforms, focus_dist),        60);
+        assert_eq!(offset_of!(FrameUniforms, ca_strength),       64);
+        assert_eq!(offset_of!(FrameUniforms, vignette),          68);
+        assert_eq!(offset_of!(FrameUniforms, grain),             72);
         // Verify Pod is satisfied (bytemuck requires no padding bytes and no
         // invalid bit patterns — both f32 and u32 are Pod, so this is fine).
         let _: &[u8] = bytemuck::bytes_of(&FrameUniforms::zeroed());

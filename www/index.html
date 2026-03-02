@@ -625,6 +625,35 @@
                         <!-- Integer steps ×10; JS divides by 10 to give 0.0–4.0 range. -->
                         <input id="ibl-scale-slider" type="range" min="0" max="40" value="10" step="1">
                     </div>
+
+                    <div class="ctrl-label" style="margin-top: 8px">Post-process</div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Chromatic aberr.</span>
+                            <span class="slider-value" id="ca-value">0.0</span>
+                        </div>
+                        <!-- Integer steps ×10; JS divides by 10 to give 0.0–3.0. -->
+                        <input id="ca-slider" type="range" min="0" max="30" value="0" step="1">
+                    </div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Vignette</span>
+                            <span class="slider-value" id="vignette-value">0.0</span>
+                        </div>
+                        <!-- Integer steps ×10; JS divides by 10 to give 0.0–1.0. -->
+                        <input id="vignette-slider" type="range" min="0" max="10" value="0" step="1">
+                    </div>
+
+                    <div class="slider-row">
+                        <div class="slider-header">
+                            <span class="ctrl-label">Film grain</span>
+                            <span class="slider-value" id="grain-value">0.0</span>
+                        </div>
+                        <!-- Integer steps ×10; JS divides by 10 to give 0.0–1.0. -->
+                        <input id="grain-slider" type="range" min="0" max="10" value="0" step="1">
+                    </div>
                 </div>
 
                 <!-- Camera tab: FOV slider + depth of field + reset -->

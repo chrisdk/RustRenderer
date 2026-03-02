@@ -381,5 +381,8 @@ mod shader_tests {
         assert_eq!(field_offset(m, "exposure"),          offset_of!(FrameUniforms, exposure)          as u32);
         assert_eq!(field_offset(m, "aperture"),          offset_of!(FrameUniforms, aperture)          as u32);
         assert_eq!(field_offset(m, "focus_dist"),        offset_of!(FrameUniforms, focus_dist)        as u32);
+        assert_eq!(field_offset(m, "ca_strength"),       offset_of!(FrameUniforms, ca_strength)       as u32);
+        assert_eq!(field_offset(m, "vignette"),          offset_of!(FrameUniforms, vignette)          as u32);
+        assert_eq!(field_offset(m, "grain"),             offset_of!(FrameUniforms, grain)             as u32);
     }
 }

@@ -109,6 +109,17 @@ export function render(width: number, height: number, sample_index: number, prev
 export function set_aperture(radius: number): void;
 
 /**
+ * Sets the chromatic aberration strength for the path-tracer output.
+ *
+ * Radially shifts the red channel outward and blue channel inward from the
+ * image centre, mimicking the colour fringing of cheap lenses. Strength 0.0
+ * disables the effect entirely (no overhead). Good visible range: 0.0–3.0.
+ * Changes take effect on the next `render()` dispatch without restarting
+ * accumulation — the effect is applied to the already-accumulated average.
+ */
+export function set_ca_strength(strength: number): void;
+
+/**
  * Controls whether the loaded environment map (or procedural sky) is rendered
  * as the visible background.
  *
@@ -150,6 +161,16 @@ export function set_exposure(stops: number): void;
  * effect on the next `render()` call with `sample_index = 0`.
  */
 export function set_focus_distance(dist: number): void;
+
+/**
+ * Sets the film grain intensity for the path-tracer output.
+ *
+ * Adds perceptually-uniform white noise after gamma encoding. Seed is mixed
+ * with the sample index so grain never accumulates into permanent artifacts.
+ * 0.0 = no grain; 1.0 ≈ heavy grain. Changes take effect on the next
+ * dispatch without restarting accumulation.
+ */
+export function set_grain(strength: number): void;
 
 /**
  * Enables or disables Image-Based Lighting.
@@ -234,6 +255,15 @@ export function set_sun_elevation(degrees: number): void;
 export function set_sun_intensity(scale: number): void;
 
 /**
+ * Sets the vignette strength for the path-tracer output.
+ *
+ * Darkens the corners of the frame in linear light (before tone-mapping).
+ * 0.0 = no darkening; 1.0 = corners nearly black. Changes take effect
+ * on the next dispatch without restarting accumulation.
+ */
+export function set_vignette(strength: number): void;
+
+/**
  * Removes the currently loaded HDR environment map and reverts to the
  * procedural sky gradient.
  *
@@ -272,15 +302,18 @@ export interface InitOutput {
     readonly raster_get_pixels: (a: number, b: number) => any;
     readonly render: (a: number, b: number, c: number, d: number) => void;
     readonly set_aperture: (a: number) => void;
+    readonly set_ca_strength: (a: number) => void;
     readonly set_env_background: (a: number) => void;
     readonly set_exposure: (a: number) => void;
     readonly set_focus_distance: (a: number) => void;
+    readonly set_grain: (a: number) => void;
     readonly set_ibl_enabled: (a: number) => void;
     readonly set_ibl_scale: (a: number) => void;
     readonly set_max_bounces: (a: number) => void;
     readonly set_sun_azimuth: (a: number) => void;
     readonly set_sun_elevation: (a: number) => void;
     readonly set_sun_intensity: (a: number) => void;
+    readonly set_vignette: (a: number) => void;
     readonly update_camera: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly get_scene_bounds: () => any;
     readonly unload_environment: () => void;

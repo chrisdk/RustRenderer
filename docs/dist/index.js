@@ -8,7 +8,7 @@
  *   4. Preview: update_camera → raster_frame → raster_get_pixels (60 fps rasterizer).
  *   5. HQ render: update_camera → render → get_pixels → putImageData (path tracer).
  */
-import init, { init_renderer, load_scene, load_environment, unload_environment, set_ibl_enabled, set_env_background, set_max_bounces, set_sun_azimuth, set_sun_elevation, set_sun_intensity, set_ibl_scale, set_exposure, set_aperture, set_focus_distance, update_camera, render, get_pixels, raster_frame, raster_get_pixels, get_scene_bounds, get_scene_stats, } from '../pkg/render.js';
+import init, { init_renderer, load_scene, load_environment, unload_environment, set_ibl_enabled, set_env_background, set_max_bounces, set_sun_azimuth, set_sun_elevation, set_sun_intensity, set_ibl_scale, set_exposure, set_aperture, set_focus_distance, set_ca_strength, set_vignette, set_grain, update_camera, render, get_pixels, raster_frame, raster_get_pixels, get_scene_bounds, get_scene_stats, } from '../pkg/render.js';
 import { BUILTIN_SCENES } from './scenes.js';
 import { Turntable } from './turntable.js';
 import { RenderController } from './render-controller.js';
@@ -58,6 +58,12 @@ const sunIntSlider = document.getElementById('sun-int-slider');
 const sunIntValue = document.getElementById('sun-int-value');
 const iblScaleSlider = document.getElementById('ibl-scale-slider');
 const iblScaleValue = document.getElementById('ibl-scale-value');
+const caSlider = document.getElementById('ca-slider');
+const caValue = document.getElementById('ca-value');
+const vignetteSlider = document.getElementById('vignette-slider');
+const vignetteValue = document.getElementById('vignette-value');
+const grainSlider = document.getElementById('grain-slider');
+const grainValue = document.getElementById('grain-value');
 // ─────────────────────────────────────────────────────────────────────────────
 // Turntable camera
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,6 +616,31 @@ iblScaleSlider.addEventListener('input', () => {
     const scale = parseInt(iblScaleSlider.value, 10) / 10;
     iblScaleValue.textContent = `${scale.toFixed(1)}×`;
     set_ibl_scale(scale);
+    scheduleRenderRestart();
+});
+/** Chromatic aberration slider. Integer steps ×10 → 0.0–3.0 strength.
+ *  Applied after accumulation so it takes effect without restarting the render. */
+caSlider.addEventListener('input', () => {
+    const strength = parseInt(caSlider.value, 10) / 10;
+    caValue.textContent = strength.toFixed(1);
+    set_ca_strength(strength);
+    scheduleRenderRestart();
+});
+/** Vignette slider. Integer steps ×10 → 0.0–1.0 strength.
+ *  Darkens corners in linear space before tone-mapping. */
+vignetteSlider.addEventListener('input', () => {
+    const strength = parseInt(vignetteSlider.value, 10) / 10;
+    vignetteValue.textContent = strength.toFixed(1);
+    set_vignette(strength);
+    scheduleRenderRestart();
+});
+/** Film grain slider. Integer steps ×10 → 0.0–1.0 intensity.
+ *  Added in gamma space after encoding; re-seeded each sample so grain
+ *  never accumulates into permanent fixed-pixel artifacts. */
+grainSlider.addEventListener('input', () => {
+    const strength = parseInt(grainSlider.value, 10) / 10;
+    grainValue.textContent = strength.toFixed(1);
+    set_grain(strength);
     scheduleRenderRestart();
 });
 // ─────────────────────────────────────────────────────────────────────────────

@@ -155,6 +155,13 @@ struct FrameUniforms {
     // ── Depth of field (offsets 56–63) ───────────────────────────────────────
     aperture:   f32,  // thin-lens radius in world units; 0 = pinhole (no DoF)
     focus_dist: f32,  // focal plane distance in world units
+
+    // ── Post-processing (offsets 64–79) ──────────────────────────────────────
+    // Applied after accumulation during the final output write — no reaccumulate needed.
+    ca_strength: f32, // chromatic aberration: 0 = off; 1–3 = visible; applied before tonemap
+    vignette:    f32, // corner darkening: 0 = off; 1 = corners fully black; linear-space
+    grain:       f32, // film grain intensity: 0 = off; 0–1; applied after gamma
+    _pad_post:   f32, // pad to 80 bytes (multiple of 16)
 }
 
 // ============================================================================
@@ -1371,6 +1378,100 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     accum[idx] = total;
 
-    let avg = total.rgb / f32(frame.sample_index + 1u);
-    output[idx] = pack_rgba8(avg);
+    // ── Post-processing ───────────────────────────────────────────────────────
+    //
+    // Applied every dispatch to the per-sample average, so changing any of
+    // these controls takes effect immediately without restarting accumulation.
+    //
+    // Order: chromatic aberration → vignette (linear space) → tone-map + gamma
+    //        → film grain (perceptual / gamma-encoded space).
+    //
+    // All effects are skipped (strength == 0) with an early branch so they
+    // cost nothing when disabled — important for the common case.
+
+    let sample_count = f32(frame.sample_index + 1u);
+
+    // ── Chromatic aberration ──────────────────────────────────────────────────
+    //
+    // Radial colour fringing: cheap lenses focus different wavelengths at
+    // slightly different distances, so the red and blue channels arrive at the
+    // sensor shifted relative to green.  We simulate this by offsetting R and B
+    // in opposite radial directions from the image centre.
+    //
+    // We read the R channel from a pixel shifted outward and the B channel from
+    // a pixel shifted inward.  G stays at the current pixel.  We divide each
+    // channel by the same `sample_count` so that the CA produces consistent
+    // colour even while the render is still accumulating.
+    //
+    // Reading from a neighbour's accum slot that another thread is currently
+    // writing to creates a benign data race: at worst we see the previous frame's
+    // value for that pixel, which is off by one sample out of many thousands and
+    // completely invisible in practice.
+    var display: vec3<f32>;
+    if frame.ca_strength > 0.0 {
+        // Pixel offset in texels: scales linearly with distance from centre.
+        let cx     = f32(w) * 0.5;
+        let cy     = f32(h) * 0.5;
+        let off_x  = i32(round((f32(px) - cx) / cx * frame.ca_strength));
+        let off_y  = i32(round((f32(py) - cy) / cy * frame.ca_strength));
+        // R shifts outward (away from centre).
+        let rx = u32(clamp(i32(px) + off_x, 0, i32(w) - 1));
+        let ry = u32(clamp(i32(py) + off_y, 0, i32(h) - 1));
+        // B shifts inward (toward centre).
+        let bx = u32(clamp(i32(px) - off_x, 0, i32(w) - 1));
+        let by = u32(clamp(i32(py) - off_y, 0, i32(h) - 1));
+        let r_avg = accum[ry * w + rx].r / sample_count;
+        let g_avg = total.g                / sample_count;
+        let b_avg = accum[by * w + bx].b  / sample_count;
+        display = vec3(r_avg, g_avg, b_avg);
+    } else {
+        display = total.rgb / sample_count;
+    }
+
+    // ── Vignette ─────────────────────────────────────────────────────────────
+    //
+    // Cos^4 fall-off approximation: real lenses darken corners because the
+    // effective aperture shrinks at oblique angles. We use `uv` in [-0.5, 0.5]
+    // and dot(uv, uv) as a cheap squared-radius. The `* 2.0` in the exponent
+    // steepens the curve so strength=1 puts the corners near black without
+    // needing huge coefficient values.
+    //
+    // Applied in linear light *before* tone-mapping so the darkening interacts
+    // correctly with the ACES S-curve (otherwise vignette can look "washed out"
+    // in bright areas if applied in gamma space).
+    if frame.vignette > 0.0 {
+        let uv  = vec2(f32(px) / f32(w), f32(py) / f32(h)) - vec2(0.5);
+        let r2  = dot(uv, uv);   // 0 at centre, 0.5 at corner
+        let atten = max(0.0, 1.0 - frame.vignette * r2 * 4.0);
+        display *= atten;
+    }
+
+    // ── Tone-map + gamma-encode ───────────────────────────────────────────────
+    //
+    // Same path as pack_rgba8() but inlined so we can insert grain between
+    // gamma encoding and the final integer pack.
+    let exposed = display * pow(2.0, frame.exposure);
+    let mapped  = aces(exposed);
+    var enc     = pow(clamp(mapped, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2));
+
+    // ── Film grain ───────────────────────────────────────────────────────────
+    //
+    // White noise added after gamma encoding so each stop of brightness gets
+    // the same absolute noise amplitude (just as film grain doesn't care whether
+    // it's sitting on a shadow or a highlight).
+    //
+    // Seeded from pixel position XOR sample_index so the pattern changes each
+    // sample, preventing stationary grain artifacts that would bake into the
+    // accumulation average.  The 0.05 scale maps strength=1 to ≈±6 counts out
+    // of 255, which is about the coarsest grain on fast film.
+    if frame.grain > 0.0 {
+        var gseed = (px * 1973u) ^ (py * 9277u) ^ (frame.sample_index * 26699u + 3u);
+        let noise = (rand_f32(&gseed) * 2.0 - 1.0) * frame.grain * 0.05;
+        enc = clamp(enc + vec3(noise), vec3(0.0), vec3(1.0));
+    }
+
+    let r = u32(enc.r * 255.0 + 0.5);
+    let g = u32(enc.g * 255.0 + 0.5);
+    let b = u32(enc.b * 255.0 + 0.5);
+    output[idx] = r | (g << 8u) | (b << 16u) | (255u << 24u);
 }

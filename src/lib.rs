@@ -417,6 +417,57 @@ pub fn set_focus_distance(dist: f32) {
     });
 }
 
+/// Sets the chromatic aberration strength for the path-tracer output.
+///
+/// Radially shifts the red channel outward and blue channel inward from the
+/// image centre, mimicking the colour fringing of cheap lenses. Strength 0.0
+/// disables the effect entirely (no overhead). Good visible range: 0.0–3.0.
+/// Changes take effect on the next `render()` dispatch without restarting
+/// accumulation — the effect is applied to the already-accumulated average.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_ca_strength(strength: f32) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.ca_strength = strength.max(0.0);
+            log::debug!("ca_strength → {strength:.3}");
+        }
+    });
+}
+
+/// Sets the vignette strength for the path-tracer output.
+///
+/// Darkens the corners of the frame in linear light (before tone-mapping).
+/// 0.0 = no darkening; 1.0 = corners nearly black. Changes take effect
+/// on the next dispatch without restarting accumulation.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_vignette(strength: f32) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.vignette = strength.clamp(0.0, 2.0);
+            log::debug!("vignette → {strength:.3}");
+        }
+    });
+}
+
+/// Sets the film grain intensity for the path-tracer output.
+///
+/// Adds perceptually-uniform white noise after gamma encoding. Seed is mixed
+/// with the sample index so grain never accumulates into permanent artifacts.
+/// 0.0 = no grain; 1.0 ≈ heavy grain. Changes take effect on the next
+/// dispatch without restarting accumulation.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_grain(strength: f32) {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.renderer.grain = strength.clamp(0.0, 1.0);
+            log::debug!("grain → {strength:.3}");
+        }
+    });
+}
+
 /// Returns the world-space axis-aligned bounding box of the loaded scene as a
 /// `Float32Array` of six values: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
 ///

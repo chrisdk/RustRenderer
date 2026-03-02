@@ -24,6 +24,9 @@ import init, {
     set_exposure,
     set_aperture,
     set_focus_distance,
+    set_ca_strength,
+    set_vignette,
+    set_grain,
     update_camera,
     render,
     get_pixels,
@@ -83,6 +86,12 @@ const sunIntSlider   = document.getElementById('sun-int-slider')   as HTMLInputE
 const sunIntValue    = document.getElementById('sun-int-value')!;
 const iblScaleSlider = document.getElementById('ibl-scale-slider') as HTMLInputElement;
 const iblScaleValue  = document.getElementById('ibl-scale-value')!;
+const caSlider       = document.getElementById('ca-slider')        as HTMLInputElement;
+const caValue        = document.getElementById('ca-value')!;
+const vignetteSlider = document.getElementById('vignette-slider')  as HTMLInputElement;
+const vignetteValue  = document.getElementById('vignette-value')!;
+const grainSlider    = document.getElementById('grain-slider')     as HTMLInputElement;
+const grainValue     = document.getElementById('grain-value')!;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Turntable camera
@@ -690,6 +699,34 @@ iblScaleSlider.addEventListener('input', () => {
     const scale = parseInt(iblScaleSlider.value, 10) / 10;
     iblScaleValue.textContent = `${scale.toFixed(1)}×`;
     set_ibl_scale(scale);
+    scheduleRenderRestart();
+});
+
+/** Chromatic aberration slider. Integer steps ×10 → 0.0–3.0 strength.
+ *  Applied after accumulation so it takes effect without restarting the render. */
+caSlider.addEventListener('input', () => {
+    const strength = parseInt(caSlider.value, 10) / 10;
+    caValue.textContent = strength.toFixed(1);
+    set_ca_strength(strength);
+    scheduleRenderRestart();
+});
+
+/** Vignette slider. Integer steps ×10 → 0.0–1.0 strength.
+ *  Darkens corners in linear space before tone-mapping. */
+vignetteSlider.addEventListener('input', () => {
+    const strength = parseInt(vignetteSlider.value, 10) / 10;
+    vignetteValue.textContent = strength.toFixed(1);
+    set_vignette(strength);
+    scheduleRenderRestart();
+});
+
+/** Film grain slider. Integer steps ×10 → 0.0–1.0 intensity.
+ *  Added in gamma space after encoding; re-seeded each sample so grain
+ *  never accumulates into permanent fixed-pixel artifacts. */
+grainSlider.addEventListener('input', () => {
+    const strength = parseInt(grainSlider.value, 10) / 10;
+    grainValue.textContent = strength.toFixed(1);
+    set_grain(strength);
     scheduleRenderRestart();
 });
 

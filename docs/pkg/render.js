@@ -161,6 +161,20 @@ export function set_aperture(radius) {
 }
 
 /**
+ * Sets the chromatic aberration strength for the path-tracer output.
+ *
+ * Radially shifts the red channel outward and blue channel inward from the
+ * image centre, mimicking the colour fringing of cheap lenses. Strength 0.0
+ * disables the effect entirely (no overhead). Good visible range: 0.0–3.0.
+ * Changes take effect on the next `render()` dispatch without restarting
+ * accumulation — the effect is applied to the already-accumulated average.
+ * @param {number} strength
+ */
+export function set_ca_strength(strength) {
+    wasm.set_ca_strength(strength);
+}
+
+/**
  * Controls whether the loaded environment map (or procedural sky) is rendered
  * as the visible background.
  *
@@ -210,6 +224,19 @@ export function set_exposure(stops) {
  */
 export function set_focus_distance(dist) {
     wasm.set_focus_distance(dist);
+}
+
+/**
+ * Sets the film grain intensity for the path-tracer output.
+ *
+ * Adds perceptually-uniform white noise after gamma encoding. Seed is mixed
+ * with the sample index so grain never accumulates into permanent artifacts.
+ * 0.0 = no grain; 1.0 ≈ heavy grain. Changes take effect on the next
+ * dispatch without restarting accumulation.
+ * @param {number} strength
+ */
+export function set_grain(strength) {
+    wasm.set_grain(strength);
 }
 
 /**
@@ -310,6 +337,18 @@ export function set_sun_elevation(degrees) {
  */
 export function set_sun_intensity(scale) {
     wasm.set_sun_intensity(scale);
+}
+
+/**
+ * Sets the vignette strength for the path-tracer output.
+ *
+ * Darkens the corners of the frame in linear light (before tone-mapping).
+ * 0.0 = no darkening; 1.0 = corners nearly black. Changes take effect
+ * on the next dispatch without restarting accumulation.
+ * @param {number} strength
+ */
+export function set_vignette(strength) {
+    wasm.set_vignette(strength);
 }
 
 /**
@@ -1169,12 +1208,12 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 490, function: Function { arguments: [Externref], shim_idx: 491, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 491, function: Function { arguments: [Externref], shim_idx: 492, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h06d57fbbcf12cfb7, wasm_bindgen__convert__closures_____invoke__h3d555e81212e6f69);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 496, function: Function { arguments: [Externref], shim_idx: 497, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 497, function: Function { arguments: [Externref], shim_idx: 498, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__he5ef96efaea0f49b, wasm_bindgen__convert__closures_____invoke__h6b539ed7f51515d5);
             return ret;
         },
