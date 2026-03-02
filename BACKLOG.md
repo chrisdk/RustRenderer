@@ -45,7 +45,7 @@ Settings that let the user tune the renderer without editing code. Each item is 
 
 ## Performance Improvements
 
-- **SAH BVH** — replace the current median-split build with Surface Area Heuristic splits. SAH trees typically halve traversal time on complex scenes at the cost of a slower build; BVH build time is already dominated by scene load, so the tradeoff is very favourable.
+- ~~**SAH BVH**~~ — done. Binned SAH (8 bins/axis, O(N) per node) replaced median-split; expected 2–4× fewer node visits on complex scenes.
 - **Two-level BVH (TLAS/BLAS)** — instead of flattening all instances into world-space triangles, keep per-mesh BLASes and build a TLAS over instance bounding boxes. Enables true instancing (one BLAS for many instances) and much smaller GPU memory for scenes with repeated geometry.
 - **Wavefront path tracing** — reorganise the compute shader into a multi-pass wavefront where all active rays of the same type are processed together. Reduces thread divergence and improves GPU occupancy on scenes with mixed materials.
 - **Texture compression** — upload textures in BC7 (desktop) or ETC2 (mobile) block-compressed format instead of RGBA8. Reduces GPU memory bandwidth and allows larger texture sets before hitting VRAM limits.
@@ -56,6 +56,8 @@ Settings that let the user tune the renderer without editing code. Each item is 
 
 ## Maintenance
 
+- **Fix path tracer crash on Windows with NVIDIA RTX 5070** — the path tracer crashes the application entirely on Windows + Chrome with an RTX 5070. Likely a shader validation issue, storage-buffer limit, or D3D12/Vulkan behaviour that differs from Metal. Reproduce on Windows, capture the error, fix.
+- **Headless screenshot tool** — native Rust binary that loads a GLB + HDR, runs the rasteriser, and saves a PNG. Eliminates the publish → browser → screenshot cycle when iterating on shaders; lets you compare rasteriser output against a reference image from the command line.
 - **CI/CD pipeline** — GitHub Actions workflow that runs `cargo test`, `cargo clippy`, and the TypeScript tests (`npm test`) on every push and pull request. Prevents regressions from landing silently.
 - **End-to-end browser tests** — Playwright tests that load the app in a headless browser, drop a known GLB, click Render, and compare the output image against a reference (pixel hash or structural similarity). Would have caught the scene-switch race condition automatically.
 - **Benchmark suite** — a `cargo bench` / wall-clock harness that renders a fixed scene at a fixed sample count and records frame time. Run before and after performance changes to quantify improvements.

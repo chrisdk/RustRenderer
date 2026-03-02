@@ -28,20 +28,25 @@
 //! `this_node_index + 1`, so it never needs to be stored. The **right** child
 //! index is stored explicitly in [`BvhNode::right_or_first`].
 //!
-//! # Build algorithm
+//! # Build algorithm: binned SAH
 //!
-//! The build uses a simple **median split** on the **longest axis**:
+//! The build uses **Surface Area Heuristic (SAH)** splitting with a **binned**
+//! approximation for O(N) build time per node:
+//!
 //! 1. Compute the bounding box of all triangle centroids in the current node.
-//! 2. Find the axis (X, Y, or Z) along which the centroids are most spread out.
-//! 3. Sort triangles by their centroid along that axis.
-//! 4. Split at the median, so each half gets roughly the same number of
-//!    triangles.
-//! 5. Recurse into both halves.
-//! 6. If the number of triangles is small enough, make a leaf instead.
+//! 2. Divide the centroid range into [`N_BINS`] equal-width buckets per axis.
+//! 3. Assign each triangle to a bucket; accumulate per-bucket AABBs and counts.
+//! 4. Prefix-scan from the left and suffix-scan from the right to cheaply
+//!    evaluate `N_BINS − 1` candidate split planes per axis.
+//! 5. Pick the plane that minimises the SAH cost:
+//!    `cost = 1 + (N_left × SA_left + N_right × SA_right) / SA_parent`
+//! 6. If no split beats the leaf cost (`N` triangle-intersection tests),
+//!    make a leaf node — even if it exceeds `MAX_LEAF_TRIS`.
+//! 7. Otherwise partition triangles across the winning split plane and recurse.
 //!
-//! This is not the highest-quality strategy (SAH — Surface Area Heuristic —
-//! gives better trees) but it is simple, fast to build, and good enough for
-//! a first implementation.
+//! Compared to the simpler median-split approach, SAH typically halves
+//! traversal time on complex scenes — the reduced node visits more than
+//! compensate for the slightly slower build.
 
 use crate::scene::Scene;
 
@@ -51,10 +56,17 @@ use crate::scene::Scene;
 
 /// Maximum number of triangles a leaf node may contain.
 ///
-/// Leaves with more triangles would be split further. Smaller values mean
-/// deeper trees with fewer triangle tests per leaf; larger values mean
-/// shallower trees with more tests per leaf. 4 is a common sweet spot.
+/// Below this threshold the build always makes a leaf — no point paying the
+/// SAH overhead when there's nothing meaningful to split.
+/// 4 is a common sweet spot between tree depth and per-leaf work.
 const MAX_LEAF_TRIS: usize = 4;
+
+/// Number of equal-width bins used for the SAH split search on each axis.
+///
+/// More bins give a more accurate cost estimate (closer to the exact optimal)
+/// but increase the O(N_BINS) inner loop. 8 is a well-known sweet spot:
+/// near-optimal quality with negligible extra build time.
+const N_BINS: usize = 8;
 
 // ============================================================================
 // Public types
@@ -218,21 +230,59 @@ impl Bvh {
 // ============================================================================
 
 /// An axis-aligned bounding box, used internally during the build.
+#[derive(Clone, Copy)]
 struct Aabb {
     min: [f32; 3],
     max: [f32; 3],
 }
 
+impl Aabb {
+    /// An empty AABB with min = +∞ and max = −∞.
+    ///
+    /// `grow()`-ing it with any point produces a valid single-point box.
+    fn empty() -> Self {
+        Aabb { min: [f32::INFINITY; 3], max: [f32::NEG_INFINITY; 3] }
+    }
+
+    /// Expands this AABB to include point `p`.
+    fn grow(&mut self, p: [f32; 3]) {
+        self.min = [self.min[0].min(p[0]), self.min[1].min(p[1]), self.min[2].min(p[2])];
+        self.max = [self.max[0].max(p[0]), self.max[1].max(p[1]), self.max[2].max(p[2])];
+    }
+
+    /// Returns the smallest AABB that contains both `self` and `other`.
+    fn union(self, other: Aabb) -> Aabb {
+        Aabb {
+            min: [self.min[0].min(other.min[0]), self.min[1].min(other.min[1]), self.min[2].min(other.min[2])],
+            max: [self.max[0].max(other.max[0]), self.max[1].max(other.max[1]), self.max[2].max(other.max[2])],
+        }
+    }
+
+    /// Half-surface-area: `dx·dy + dy·dz + dz·dx`.
+    ///
+    /// The actual surface area is 2× this value. Because the SAH cost formula
+    /// always divides a child's area by the parent's, the factor of 2 cancels
+    /// everywhere — omitting it is an optimisation, not an approximation.
+    ///
+    /// Returns 0 for degenerate (empty or flat) boxes.
+    fn half_area(self) -> f32 {
+        let dx = (self.max[0] - self.min[0]).max(0.0);
+        let dy = (self.max[1] - self.min[1]).max(0.0);
+        let dz = (self.max[2] - self.min[2]).max(0.0);
+        dx * dy + dy * dz + dz * dx
+    }
+}
+
 /// A triangle with all the data needed to build the BVH.
 ///
 /// Stored separately from `BvhTriangle` because the centroid is only needed
-/// during the build (for sorting) and not at traversal time.
+/// during the build (for SAH bin assignment) and not at traversal time.
 struct BuildTriangle {
     v0:       [f32; 3],
     v1:       [f32; 3],
     v2:       [f32; 3],
-    /// The average of the three vertex positions, used to decide which half of
-    /// the split the triangle belongs to.
+    /// The average of the three vertex positions, used to assign the triangle
+    /// to a SAH bin and decide which half of the split it belongs to.
     centroid: [f32; 3],
     i0: u32, i1: u32, i2: u32,
     n0: [f32; 3], n1: [f32; 3], n2: [f32; 3],
@@ -306,6 +356,156 @@ fn collect_triangles(scene: &Scene) -> Vec<BuildTriangle> {
     result
 }
 
+/// Returns the tightest AABB containing all **vertices** of every triangle.
+///
+/// This is the AABB stored on BVH nodes — it must cover vertex positions, not
+/// just centroids, so that ray–box tests catch every ray that hits the geometry.
+fn compute_aabb(tris: &[BuildTriangle]) -> Aabb {
+    let mut b = Aabb::empty();
+    for tri in tris {
+        b.grow(tri.v0);
+        b.grow(tri.v1);
+        b.grow(tri.v2);
+    }
+    b
+}
+
+/// Returns the tightest AABB containing all triangle **centroids**.
+///
+/// Used by the SAH to place bin boundaries. Centroid bounds are typically much
+/// tighter than vertex bounds, which means bins are better populated and the
+/// cost estimates are more accurate.
+fn centroid_bounds(tris: &[BuildTriangle]) -> Aabb {
+    let mut b = Aabb::empty();
+    for tri in tris {
+        b.grow(tri.centroid);
+    }
+    b
+}
+
+/// Searches for the SAH-optimal split plane over all three axes using binning.
+///
+/// # Surface Area Heuristic
+///
+/// SAH estimates the expected traversal cost of splitting a node as:
+/// ```text
+/// cost = 1 + (N_left × SA_left + N_right × SA_right) / SA_parent
+/// ```
+/// where `SA` is the surface area of the respective AABB and `N` is the
+/// triangle count. A large child AABB that is often hit by rays is expensive;
+/// a tiny child that is rarely reached is cheap even with many triangles.
+///
+/// We use half-areas throughout (omitting the ×2 factor from the area formula)
+/// because it cancels in the ratio — cheaper to compute, same result.
+///
+/// # Binning
+///
+/// Testing every possible split would require O(N log N) sorting per node.
+/// Instead the centroid range is divided into [`N_BINS`] equal-width buckets
+/// per axis; triangles are assigned to bins in O(N), prefix/suffix scans
+/// compute the SAH cost of each of the `(N_BINS − 1) × 3` candidate planes
+/// in O(N_BINS), and the best is returned.
+///
+/// # Return value
+///
+/// `Some((axis, split_pos))` if the best split is cheaper than a leaf
+/// (`N` triangle tests). `None` if a leaf is cheaper — stop recursing.
+fn find_sah_split(
+    tris:      &[BuildTriangle],
+    parent_sa: f32,
+    cent_aabb: Aabb,
+) -> Option<(usize, f32)> {
+    // Degenerate parent: can't compute a meaningful ratio — caller should leaf.
+    if parent_sa <= 0.0 {
+        return None;
+    }
+
+    // Baseline: the cost of making this node a leaf and testing all triangles.
+    // The SAH traversal constant is 1 (crossing a node) vs 1 (testing a tri),
+    // so leaf cost = N.
+    let leaf_cost = tris.len() as f32;
+
+    let mut best_cost = leaf_cost;
+    let mut best_axis = 0_usize;
+    let mut best_pos  = 0.0_f32;
+    let mut found     = false;
+
+    for axis in 0..3_usize {
+        let span = cent_aabb.max[axis] - cent_aabb.min[axis];
+        if span < 1e-6 {
+            continue; // All centroids share the same coordinate — useless axis.
+        }
+
+        // ── Bin assignment ────────────────────────────────────────────────────
+        // Each bin accumulates the vertex-AABB and triangle count for all
+        // triangles whose centroid falls within that bin's range.
+        let mut bin_aabb  = [Aabb::empty(); N_BINS];
+        let mut bin_count = [0_u32; N_BINS];
+
+        // `scale` maps a centroid coordinate to a [0, N_BINS) bin index.
+        let scale = N_BINS as f32 / span;
+
+        for tri in tris {
+            let b = (((tri.centroid[axis] - cent_aabb.min[axis]) * scale) as usize)
+                .min(N_BINS - 1); // clamp to handle the max-boundary case
+            bin_aabb[b].grow(tri.v0);
+            bin_aabb[b].grow(tri.v1);
+            bin_aabb[b].grow(tri.v2);
+            bin_count[b] += 1;
+        }
+
+        // ── Prefix scan (left side of each split plane) ───────────────────────
+        // prefix_aabb[i]  = union of bin_aabb[0..=i]
+        // prefix_count[i] = sum of bin_count[0..=i]
+        let mut prefix_aabb  = [Aabb::empty(); N_BINS];
+        let mut prefix_count = [0_u32; N_BINS];
+        let mut acc_aabb  = Aabb::empty();
+        let mut acc_count = 0_u32;
+        for i in 0..N_BINS {
+            acc_aabb   = acc_aabb.union(bin_aabb[i]);
+            acc_count += bin_count[i];
+            prefix_aabb[i]  = acc_aabb;
+            prefix_count[i] = acc_count;
+        }
+
+        // ── Suffix scan (right side of each split plane) ──────────────────────
+        // suffix_aabb[i]  = union of bin_aabb[i..N_BINS]
+        // suffix_count[i] = sum of bin_count[i..N_BINS]
+        let mut suffix_aabb  = [Aabb::empty(); N_BINS];
+        let mut suffix_count = [0_u32; N_BINS];
+        acc_aabb  = Aabb::empty();
+        acc_count = 0;
+        for i in (0..N_BINS).rev() {
+            acc_aabb   = acc_aabb.union(bin_aabb[i]);
+            acc_count += bin_count[i];
+            suffix_aabb[i]  = acc_aabb;
+            suffix_count[i] = acc_count;
+        }
+
+        // ── Evaluate N_BINS−1 split planes ────────────────────────────────────
+        // Plane i separates bins [0..=i] (left) from bins [i+1..N_BINS] (right).
+        for i in 0..(N_BINS - 1) {
+            let n_left  = prefix_count[i]     as f32;
+            let n_right = suffix_count[i + 1] as f32;
+            if n_left == 0.0 || n_right == 0.0 {
+                continue; // Empty partition — not a valid split.
+            }
+            let sa_left  = prefix_aabb[i].half_area();
+            let sa_right = suffix_aabb[i + 1].half_area();
+            let cost = 1.0 + (n_left * sa_left + n_right * sa_right) / parent_sa;
+            if cost < best_cost {
+                best_cost = cost;
+                best_axis = axis;
+                // Convert bin-boundary index back to a world-space coordinate.
+                best_pos  = cent_aabb.min[axis] + (i + 1) as f32 / scale;
+                found     = true;
+            }
+        }
+    }
+
+    if found { Some((best_axis, best_pos)) } else { None }
+}
+
 /// Recursively builds BVH nodes for the triangles in `tris`, appending new
 /// nodes to `nodes` and returning the index of the node just created.
 ///
@@ -319,13 +519,14 @@ fn build_node(
     tris:  &mut [BuildTriangle],
     global_start: usize,
 ) -> usize {
-    // Reserve a slot for this node. Children will be pushed after this.
+    // Reserve a slot for this node. Children will be pushed after this, so the
+    // left child lands at node_idx + 1 (pre-order invariant).
     let node_idx = nodes.len();
     nodes.push(BvhNode { aabb_min: [0.0; 3], right_or_first: 0, aabb_max: [0.0; 3], count: 0 });
 
     let aabb = compute_aabb(tris);
 
-    // Base case: small enough to be a leaf.
+    // ── Hard leaf: too few triangles to bother splitting ──────────────────────
     if tris.len() <= MAX_LEAF_TRIS {
         nodes[node_idx] = BvhNode {
             aabb_min:       aabb.min,
@@ -336,57 +537,59 @@ fn build_node(
         return node_idx;
     }
 
-    // Sort triangles by their centroid along the longest axis of the AABB.
-    let axis = longest_axis(&aabb);
-    tris.sort_unstable_by(|a, b| a.centroid[axis].total_cmp(&b.centroid[axis]));
+    // ── SAH split search ──────────────────────────────────────────────────────
+    let cent_aabb = centroid_bounds(tris);
+    let parent_sa = aabb.half_area();
 
-    let mid = tris.len() / 2;
+    let (axis, split_pos) = match find_sah_split(tris, parent_sa, cent_aabb) {
+        Some(s) => s,
+        None    => {
+            // SAH says a leaf is cheaper than any split — probably co-located
+            // geometry where splitting wouldn't reduce traversal cost.
+            // Make a (possibly oversized) leaf and stop.
+            nodes[node_idx] = BvhNode {
+                aabb_min:       aabb.min,
+                right_or_first: global_start as u32,
+                aabb_max:       aabb.max,
+                count:          tris.len() as u32,
+            };
+            return node_idx;
+        }
+    };
 
-    // Build the left child. Because we already pushed our placeholder at
-    // node_idx, the left child will be pushed at node_idx + 1.
+    // ── Partition around the split plane (O(N), no allocation) ───────────────
+    // Dutch-flag–style: scan left to right, swap triangles with centroid <
+    // split_pos to the front of the slice. `mid` ends up as the boundary index.
+    let mut mid = 0;
+    for i in 0..tris.len() {
+        if tris[i].centroid[axis] < split_pos {
+            tris.swap(i, mid);
+            mid += 1;
+        }
+    }
+
+    // ── Degenerate partition fallback ─────────────────────────────────────────
+    // If all centroids fall exactly on one side of the split plane (e.g. they
+    // are all equal), the partition above puts everything in one half — which
+    // is infinite recursion. Fall back to a plain median split on the same axis
+    // so we always make progress regardless of the geometry.
+    if mid == 0 || mid == tris.len() {
+        mid = tris.len() / 2;
+        tris.sort_unstable_by(|a, b| a.centroid[axis].total_cmp(&b.centroid[axis]));
+    }
+
+    // ── Recurse ───────────────────────────────────────────────────────────────
     build_node(nodes, &mut tris[..mid], global_start);
-
-    // Build the right child. It follows the entire left subtree.
     let right_idx = build_node(nodes, &mut tris[mid..], global_start + mid);
 
     nodes[node_idx] = BvhNode {
         aabb_min:       aabb.min,
         right_or_first: right_idx as u32,
         aabb_max:       aabb.max,
-        count:          0, // 0 signals an internal node
+        count:          0, // 0 = internal node
     };
 
     node_idx
-}
-
-/// Computes the tightest axis-aligned bounding box that contains all vertices
-/// of every triangle in `tris`.
-fn compute_aabb(tris: &[BuildTriangle]) -> Aabb {
-    let mut min = [f32::INFINITY;     3];
-    let mut max = [f32::NEG_INFINITY; 3];
-
-    for tri in tris {
-        for v in [tri.v0, tri.v1, tri.v2] {
-            for i in 0..3 {
-                if v[i] < min[i] { min[i] = v[i]; }
-                if v[i] > max[i] { max[i] = v[i]; }
-            }
-        }
-    }
-
-    Aabb { min, max }
-}
-
-/// Returns the index of the axis (0=X, 1=Y, 2=Z) along which `aabb` is widest.
-///
-/// Splitting along the widest axis tends to produce the most balanced BVH.
-fn longest_axis(aabb: &Aabb) -> usize {
-    let dx = aabb.max[0] - aabb.min[0];
-    let dy = aabb.max[1] - aabb.min[1];
-    let dz = aabb.max[2] - aabb.min[2];
-    if dx >= dy && dx >= dz { 0 }
-    else if dy >= dz         { 1 }
-    else                      { 2 }
 }
 
 /// Multiplies a 3D point by a column-major 4×4 homogeneous transform matrix.
@@ -844,5 +1047,47 @@ mod tests {
         let bvh = Bvh::build(&scene);
         // One mesh, two instances → two world-space triangles in the BVH.
         assert_eq!(bvh.triangles.len(), 2, "expected 2 triangles (one per instance)");
+    }
+
+    /// SAH should isolate an extreme outlier triangle from a tight cluster.
+    ///
+    /// 7 triangles are packed into x ∈ [0, 0.7] (centroids every 0.1 units).
+    /// One outlier sits at x = 100. A median split would put 4 triangles on
+    /// each side — splitting the cluster in half. SAH should instead put all
+    /// 7 cluster triangles together and isolate the outlier, because merging
+    /// the cluster is cheap (small AABB, low SA) while splitting the huge
+    /// combined box would penalise the cluster unnecessarily.
+    ///
+    /// We verify the structural property: the child subtrees correspond to
+    /// the cluster (max_x < 2) and the outlier (min_x > 50) respectively.
+    #[test]
+    fn test_sah_isolates_outlier() {
+        let mut tris: Vec<_> = (0..7).map(|i| {
+            let x = i as f32 * 0.1;
+            ([x, 0.0, 0.0], [x + 0.05, 0.0, 0.0], [x, 0.1, 0.0])
+        }).collect();
+        // The outlier — far from the cluster.
+        tris.push(([100.0, 0.0, 0.0], [100.05, 0.0, 0.0], [100.0, 0.1, 0.0]));
+
+        let scene = scene_from_triangles(&tris);
+        let bvh   = Bvh::build(&scene);
+
+        // Root must split (8 triangles > MAX_LEAF_TRIS = 4).
+        assert_eq!(bvh.nodes[0].count, 0, "root should be internal");
+
+        // Collect the AABBs of the two direct children of the root.
+        let left_node  = &bvh.nodes[1];
+        let right_node = &bvh.nodes[bvh.nodes[0].right_or_first as usize];
+
+        // One child should fully contain the cluster (max_x < 2),
+        // the other should contain only the outlier (min_x > 50).
+        let (cluster_node, outlier_node) =
+            if left_node.aabb_max[0] < 2.0 { (left_node, right_node) }
+            else                            { (right_node, left_node) };
+
+        assert!(cluster_node.aabb_max[0] < 2.0,
+            "cluster child max_x={} should be < 2", cluster_node.aabb_max[0]);
+        assert!(outlier_node.aabb_min[0] > 50.0,
+            "outlier child min_x={} should be > 50", outlier_node.aabb_min[0]);
     }
 }

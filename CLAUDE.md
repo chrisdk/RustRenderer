@@ -106,7 +106,7 @@ publish.sh               build, assemble docs/, commit, push to GitHub Pages
 ## What's built
 
 - [x] GLTF scene loader (`Scene::from_gltf`) — geometry, materials, textures, scene graph traversal, instancing
-- [x] BVH construction (`Bvh::build`) — median split on longest axis, flat pre-order layout
+- [x] BVH construction (`Bvh::build`) — binned SAH (8 bins/axis, O(N) per node), flat pre-order layout
 - [x] Camera (`Camera`, `Ray`) — ray generation, analytical basis vectors, turntable orbit in frontend
 - [x] CPU renderer (`src/renderer/`) — math helpers, ray–AABB (slab), ray–triangle (Möller–Trumbore), iterative BVH traversal
 - [x] GPU path tracer — `trace.wgsl` compute shader: full PBR GGX, metallic/roughness BRDF, glass/transmission, normal maps, emissive surfaces
