@@ -129,6 +129,7 @@ const ctrl = new RenderController({
         lastBounds = bounds;
         turntable.autoFrame(bounds, vfov);
         applyTurntable();
+        refreshDofSliders();      // calibrate DoF ranges to the new orbit radius
         renderBtn.disabled   = false;
         saveBtn.disabled     = false;
         resetCamBtn.disabled = false;
@@ -537,20 +538,74 @@ fovSlider.addEventListener('input', () => {
     applyTurntable();
 });
 
-/** Aperture slider. Integer steps 0–100 → 0.000–0.100 world-unit lens radius.
- *  At 0 the shader skips the lens jitter entirely (pinhole, no DoF). */
+// ── DoF slider helpers ────────────────────────────────────────────────────────
+
+/** Formats an aperture radius for display. Adapts precision to the magnitude
+ *  so the label is never cluttered with meaningless trailing zeros. */
+function formatAperture(a: number): string {
+    if (a <= 0)   return '0';
+    if (a < 0.01) return a.toFixed(4);
+    if (a < 1.0)  return a.toFixed(3);
+    return a.toFixed(2);
+}
+
+/** Formats a focus distance for display, adapting precision to scale. */
+function formatFocusDist(d: number): string {
+    if (d < 10)  return d.toFixed(2);
+    if (d < 100) return d.toFixed(1);
+    return d.toFixed(0);
+}
+
+/**
+ * Recalibrates the aperture and focus-distance sliders to make sense for the
+ * current orbit radius. Call this after `autoFrame` (scene load, camera reset)
+ * so the controls are always in the right ballpark for the loaded scene.
+ *
+ * Focus range  : 10% – 500% of the orbit radius, default = orbit radius
+ *                (model centre is in sharp focus by default).
+ * Aperture max : 5% of the orbit radius. At this value, background geometry
+ *                half again as far as the focal plane blurs into a circle of
+ *                confusion ≈ 2.5% of image width — visible but not absurd.
+ * Aperture default : 0 (pinhole). The user opts in to blur by dragging.
+ */
+function refreshDofSliders(): void {
+    const R = turntable.radius;
+
+    // Focus distance: 200 steps across the full range gives fine enough
+    // control without the slider jumping in huge leaps.
+    const focusMin  = R * 0.1;
+    const focusMax  = R * 5.0;
+    const focusStep = (focusMax - focusMin) / 200;
+    focusDistSlider.min   = focusMin.toFixed(4);
+    focusDistSlider.max   = focusMax.toFixed(4);
+    focusDistSlider.step  = focusStep.toFixed(4);
+    focusDistSlider.value = R.toFixed(4);
+    focusDistValue.textContent = formatFocusDist(R);
+    set_focus_distance(R);
+
+    // Aperture: 100 steps from pinhole to "quite blurry" is plenty.
+    const apertureMax  = R * 0.05;
+    const apertureStep = apertureMax / 100;
+    apertureSlider.min   = '0';
+    apertureSlider.max   = apertureMax.toFixed(4);
+    apertureSlider.step  = apertureStep.toFixed(5);
+    apertureSlider.value = '0';
+    apertureValue.textContent = '0';
+    set_aperture(0);
+}
+
+/** Aperture slider — float value set dynamically by refreshDofSliders(). */
 apertureSlider.addEventListener('input', () => {
-    const radius = parseInt(apertureSlider.value, 10) / 1000;
-    apertureValue.textContent = radius.toFixed(3);
+    const radius = parseFloat(apertureSlider.value);
+    apertureValue.textContent = formatAperture(radius);
     set_aperture(radius);
     scheduleRenderRestart();
 });
 
-/** Focus distance slider. Integer steps 5–300 → 0.5–30.0 world units.
- *  The focal plane lives at this distance from the camera; everything else blurs. */
+/** Focus distance slider — float range set dynamically by refreshDofSliders(). */
 focusDistSlider.addEventListener('input', () => {
-    const dist = parseInt(focusDistSlider.value, 10) / 10;
-    focusDistValue.textContent = dist.toFixed(1);
+    const dist = parseFloat(focusDistSlider.value);
+    focusDistValue.textContent = formatFocusDist(dist);
     set_focus_distance(dist);
     scheduleRenderRestart();
 });
@@ -679,6 +734,7 @@ function resetCamera(): void {
     ctrl.cancelHighQualityRender();
     turntable.autoFrame(lastBounds, vfov);
     applyTurntable();
+    refreshDofSliders();          // orbit radius may have changed, recalibrate DoF
 }
 
 resetCamBtn.addEventListener('click', resetCamera);
