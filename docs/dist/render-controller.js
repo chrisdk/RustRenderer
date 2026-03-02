@@ -151,6 +151,9 @@ export class RenderController {
         // Kept separate from hqCancelled so the post-loop status message can
         // be specific rather than showing the generic "render cancelled" text.
         let computeFailed = false;
+        // Wall-clock start time for the spp/s throughput display.
+        // performance.now() is monotonic and sub-millisecond — better than Date.now().
+        const startMs = performance.now();
         for (let i = 0; i < this.hqSamples && !this.hqCancelled; i++) {
             this.deps.render(w, h, i, false);
             // Read back only at batch boundaries, the last sample, and sample 0
@@ -175,7 +178,15 @@ export class RenderController {
                 break;
             }
             this.deps.putImageData(pixels, w, h);
-            this.deps.setStatus(`Rendering… ${i + 1} / ${this.hqSamples} spp`);
+            // Show throughput so the user knows what their GPU is actually doing.
+            // Format: "4.3 spp/s" below 10, "12 spp/s" at 10+. Whole-number display
+            // above 10 avoids decimal jitter that would look noisy on fast machines.
+            const elapsedS = (performance.now() - startMs) / 1000;
+            const sppPerSec = elapsedS > 0 ? (i + 1) / elapsedS : 0;
+            const spsStr = sppPerSec >= 10
+                ? `${Math.round(sppPerSec)} spp/s`
+                : `${sppPerSec.toFixed(1)} spp/s`;
+            this.deps.setStatus(`Rendering… ${i + 1} / ${this.hqSamples} spp · ${spsStr}`);
         }
         const wasCancelled = this.hqCancelled;
         this.rendering = false;
