@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { RenderController, type RenderDeps } from './render-controller.js';
+import { RenderController, READBACK_BATCH, type RenderDeps } from './render-controller.js';
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -174,21 +174,25 @@ describe('startHighQualityRender', () => {
         expect(ctrl.hqRendering).toBe(false);
     });
 
-    it('stops after the in-progress sample when hqCancelled is set mid-run', async () => {
+    it('stops after the in-progress batch when hqCancelled is set mid-run', async () => {
         const { ctrl, deps } = make(10);
         ctrl.sceneLoaded = true;
 
         let callCount = 0;
         deps.get_pixels = vi.fn(async () => {
-            // Cancel after the second sample completes.
+            // Cancel after the second readback completes.
+            // With READBACK_BATCH=4: 1st readback is i=0, 2nd is i=3 (batch end).
+            // By the time the 2nd get_pixels resolves, render() has been called
+            // READBACK_BATCH times (i=0..3); the loop then exits at i=4.
             if (++callCount === 2) ctrl.hqCancelled = true;
             return new Uint8Array([0, 0, 0, 255]);
         });
 
         await ctrl.startHighQualityRender();
 
-        // Loop exits at the top of iteration 3 when it sees hqCancelled.
-        expect(deps.render).toHaveBeenCalledTimes(2);
+        // i=0 fires render+readback; i=1,2,3 fire render only; i=3 fires readback
+        // and sets hqCancelled; i=4 is blocked by the loop guard. Total: 4 renders.
+        expect(deps.render).toHaveBeenCalledTimes(READBACK_BATCH);
         expect(ctrl.cameraDirty).toBe(true);
         expect(ctrl.rendering).toBe(false);
         expect(ctrl.hqRendering).toBe(false);

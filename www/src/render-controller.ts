@@ -17,6 +17,28 @@
 /** Milliseconds between polls when waiting for the GPU pipeline to drain. */
 const POLL_MS = 16;
 
+/**
+ * How many path-tracer dispatches to queue before each GPU→CPU readback.
+ *
+ * Every `get_pixels()` call creates a full GPU→CPU sync barrier (mapAsync +
+ * staging-buffer copy). Doing it every sample keeps the GPU stalled waiting
+ * for the CPU most of the time — this is why an iPhone 16 and a MacBook Pro M4
+ * run at roughly the same samples/sec despite the M4 having 8× more GPU cores.
+ *
+ * By queueing READBACK_BATCH render() calls before each await, the GPU can
+ * pipeline that many dispatches uninterrupted. The accumulation buffer already
+ * holds the correct running average after every sample, so reading back every
+ * 4 samples instead of every 1 has no effect on image quality — the canvas
+ * just updates less frequently (which is imperceptible at > ~2 spp/frame).
+ *
+ * 4 is chosen because:
+ *   - 4× fewer sync barriers → meaningful speedup on all devices
+ *   - Canvas still updates every ~4 samples — progressive feel is preserved
+ *   - Small enough that cancellation latency (time from button press to stop)
+ *     stays well under a second on any reasonable hardware
+ */
+export const READBACK_BATCH = 4;
+
 function sleep(): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, POLL_MS));
 }
@@ -194,6 +216,15 @@ export class RenderController {
 
         for (let i = 0; i < this.hqSamples && !this.hqCancelled; i++) {
             this.deps.render(w, h, i, false);
+
+            // Read back only at batch boundaries, the last sample, and sample 0
+            // (which needs an immediate readback for the compute-failure check).
+            // Between those points the GPU runs uninterrupted, amortising the
+            // sync-barrier cost across READBACK_BATCH dispatches.
+            const isBatchEnd   = (i + 1) % READBACK_BATCH === 0;
+            const isLastSample = i === this.hqSamples - 1;
+            if (i !== 0 && !isBatchEnd && !isLastSample) continue;
+
             const pixels = await this.deps.get_pixels(w, h);
 
             // After the very first sample, sanity-check that the compute shader
